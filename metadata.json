@@ -1,0 +1,8 @@
+{
+  "name": "Zara AI - Pro GenAI Workspace",
+  "description": "The ultimate AI assistant featuring Real-time Voice, Academic Tutoring, LifeOS, SkillOS, and Advanced Code Analysis powered by Zara AI and developed by Mohammed Majeed.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
