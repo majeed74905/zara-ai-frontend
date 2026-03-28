@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense, lazy } from 'react';
+import { API_URL } from './services/apiConfig';
+
 import { useNavigate, useLocation } from 'react-router-dom';
 import { trackEvent, identifyUser } from './services/analytics';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -87,7 +89,7 @@ const App: React.FC = () => {
 
   const fetchUserProfile = useCallback(async (token: string) => {
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'}/users/me`, {
+      const res = await fetch(`${API_URL}/users/me`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {

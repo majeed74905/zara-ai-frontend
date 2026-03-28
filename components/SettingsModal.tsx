@@ -1,5 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
+import { API_URL } from '../services/apiConfig';
+
 import { X, Save, User, Settings as SettingsIcon, Monitor, UserPlus, Trash2, Edit2, Zap, Volume2 } from 'lucide-react';
 import { PersonalizationConfig, Persona, SystemConfig } from '../types';
 import { ThemeSwitcher } from './ThemeSwitcher';
@@ -189,7 +191,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             const days = parseInt(e.target.value);
                             const token = localStorage.getItem('auth_token');
                             if (token) {
-                              await fetch(`${(import.meta as any).env.VITE_API_URL || 'http://localhost:8000/api/v1'}/users/me/auto-delete?days=${days}`, {
+                              await fetch(`${API_URL}/users/me/auto-delete?days=${days}`, {
                                 method: 'POST',
                                 headers: { 'Authorization': `Bearer ${token}` }
                               });
@@ -213,7 +215,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           if (confirm("Are you sure? This action is IRREVERSIBLE. All chat history and account data will be lost forever.")) {
                             const token = localStorage.getItem('auth_token');
                             if (token) {
-                              await fetch(`${(import.meta as any).env.VITE_API_URL || 'http://localhost:8000/api/v1'}/users/me`, {
+                              await fetch(`${API_URL}/users/me`, {
                                 method: 'DELETE',
                                 headers: { 'Authorization': `Bearer ${token}` }
                               });

@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import { API_URL } from '../services/apiConfig';
+
 import { MessageSquare, GraduationCap, Code2, Layout, Settings, Sparkles, Radio, Plus, Trash2, MessageCircle, Sun, Moon, Edit2, Check, X, Image as ImageIcon, ClipboardCheck, BarChart3, Calendar, PenTool, Info, Heart, Brain, Zap, FolderOpen, Lightbulb, RotateCw, Github, LogOut, User, AlertTriangle, WifiOff, Activity, Search } from 'lucide-react';
 import { ViewMode, ChatSession } from '../types';
 import { useTheme } from '../theme/ThemeContext';
@@ -180,7 +182,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <button
                       onClick={() => {
                         const token = localStorage.getItem('auth_token');
-                        window.open(`${(import.meta as any).env.VITE_API_URL || 'http://localhost:8000/api/v1'}/users/me/history/export?format=pdf&token=${token}`, '_blank');
+                        window.open(`${API_URL}/users/me/history/export?format=pdf&token=${token}`, '_blank');
                       }}
                       className="p-1 text-text-sub hover:text-primary transition-colors"
                       title="Export PDF"
@@ -203,7 +205,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         const token = localStorage.getItem('auth_token');
                         if (q && token) {
                           try {
-                            const url = `${(import.meta as any).env.VITE_API_URL || 'http://localhost:8000/api/v1'}/users/me/history/search?q=${encodeURIComponent(q)}`;
+                            const url = `${API_URL}/users/me/history/search?q=${encodeURIComponent(q)}`;
                             const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
                             const data = await res.json();
                             console.log("Search Results:", data);

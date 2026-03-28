@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { API_URL } from '../services/apiConfig';
+
 import { Activity, ShieldCheck, Globe, AlertTriangle, RefreshCw, BarChart } from 'lucide-react';
 
 export const AdminSEOBoard: React.FC = () => {
@@ -8,7 +10,7 @@ export const AdminSEOBoard: React.FC = () => {
     const fetchStatus = async () => {
         setLoading(true);
         try {
-            const apiRes = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'}/seo/status`);
+            const apiRes = await fetch(`${API_URL}/seo/status`);
             const data = await apiRes.json();
             setStatus(data);
         } catch (e) {

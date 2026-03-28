@@ -1,7 +1,8 @@
 import axios from 'axios';
 import { Message, Source, ChatConfig, PersonalizationConfig, Persona, Attachment } from "../types";
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+import { API_URL } from './apiConfig';
+
 
 export const sendMessageToBackend = async (
     message: string,

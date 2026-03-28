@@ -1,4 +1,5 @@
-const API_URL = (import.meta as any).env.VITE_API_URL || 'http://localhost:8000/api/v1';
+import { API_URL } from './apiConfig';
+
 
 export const analysisService = {
     async analyzeFiles(files: File[]): Promise<{ context_text: string; results: any[] }> {
