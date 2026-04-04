@@ -1,4 +1,10 @@
 User-agent: *
 Allow: /
+Disallow: /api/
+Disallow: /admin/
+Disallow: /settings/
+Disallow: /magic-link
+Disallow: /verify-email
+Disallow: /reset-password
 
-Sitemap: https://zara-ai-assists.netlify.app/sitemap.xml
+Sitemap: https://zara-ai-assists.netlify.app/sitemap.xml

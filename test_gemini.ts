@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-const apiKey = "AIzaSyBSgML0tQw3qcoz7hjSyuyDJ-iZuNI_GD8";
+const apiKey = "YOUR_GEMINI_API_KEY_HERE";
 
 async function test() {
     try {

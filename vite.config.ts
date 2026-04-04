@@ -21,8 +21,8 @@ export default defineConfig(({ mode }) => {
       },
     },
     define: {
-      // This is critical: It replaces process.env.API_KEY in your code with the actual string during build
-      'process.env.API_KEY': JSON.stringify(env.API_KEY),
+      'process.env.API_KEY': JSON.stringify(env.API_KEY || ''),
+      'process.env.VITE_API_URL': JSON.stringify(env.VITE_API_URL || 'http://localhost:8000/api/v1'),
     },
     server: {
       port: 3000,

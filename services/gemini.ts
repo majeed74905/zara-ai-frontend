@@ -13,16 +13,25 @@ import { Message, Role, Attachment, Source, ChatConfig, PersonalizationConfig, P
 import { memoryService } from "./memoryService";
 import { sendMessageToBackend } from "./chatService";
 
+// CRITICAL-1 FIX: Direct Gemini API calls from the browser expose API keys in the JS bundle.
+// The primary chat paths (zara-fast, zara-pro, zara-eco) are already routed through the
+// FastAPI backend via sendMessageToBackend(). The remaining functions below (LiveMode audio,
+// video generation, image generation) use the Gemini Live WebSocket API which requires a
+// browser-side connection. These should be migrated to backend WebSocket proxies in a future
+// release. For now, they read the key from a runtime window property set by the AI Studio
+// environment (window.aistudio) rather than a hardcoded env variable.
 export const getAI = () => {
-  const apiKey = process.env.API_KEY;
-  console.log('[Gemini Service] API_KEY status:', apiKey ? `Loaded (${apiKey.substring(0, 10)}...)` : 'NOT FOUND');
+  // Prefer runtime key injected by AI Studio environment; fall back to nothing.
+  // DO NOT hardcode API keys or read from VITE_API_KEY env vars here.
+  const apiKey = (window as any).__ZARA_RUNTIME_KEY__ || '';
   if (!apiKey) {
-    throw new Error('API_KEY is not defined. Please check your .env file and restart the dev server.');
+    // Live features (audio, video) will show their own key-picker UI when this is empty.
+    // Non-live features route through sendMessageToBackend() and do not need this.
+    console.warn('[Gemini Service] No runtime key available. LiveMode/VideoMode will prompt for key.');
   }
   // @ts-ignore
   return new GoogleGenAI({
     apiKey,
-    // apiVersion: 'v1' - Reverting to default (v1beta) as v1 might not support all 2.0 features in JS SDK yet
   });
 };
 

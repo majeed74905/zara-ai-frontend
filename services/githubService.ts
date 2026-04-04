@@ -1,30 +1,7 @@
-import { Groq } from 'groq-sdk';
+// CRITICAL-1 FIX: Groq SDK removed from frontend — all AI calls proxied through backend.
+// The backend holds the GROQ_API_KEY server-side. Never import groq-sdk in browser code.
+import { sendMessageToBackend } from './chatService';
 import { Message } from '../types';
-
-let groqClient: Groq | null = null;
-const apiKey = process.env.API_KEY || ''; // Prefer environment variable, but allow overrides
-
-// Initialize Groq Client safely
-const getGroqClient = () => {
-    if (groqClient) return groqClient;
-
-    // We are running in browser, so we must be careful with keys.
-    // Prioritize the specific VITE_GROQ_API_KEY first.
-    // The generic 'apiKey' (process.env.API_KEY) often holds the Google Gemini key, which causes 401s on Groq.
-    const key = (import.meta as any).env?.VITE_GROQ_API_KEY || apiKey || localStorage.getItem('groq_api_key');
-
-    if (!key) {
-        console.warn("Groq API Key missing. Please set VITE_GROQ_API_KEY or use the settings.");
-        // Return a dummy client that will fail gracefully or prompt user
-        throw new Error("GROQ_API_KEY_MISSING");
-    }
-
-    groqClient = new Groq({
-        apiKey: key,
-        dangerouslyAllowBrowser: true // Required for client-side demo
-    });
-    return groqClient;
-};
 
 export interface RepoNode {
     path: string;
@@ -44,52 +21,39 @@ export const analyzeRepoStream = async (
     onToken: (token: string) => void,
     onStatus: (stage: string) => void
 ) => {
-    const groq = getGroqClient();
-
     const systemPrompt = `You are a Principal Software Architect AI.
-  Your goal is to deeply start analyzing a GitHub repository structure and provide a comprehensive architectural breakdown.
-  
-  OUTPUT FORMAT: Markdown with clear sections.
-  1. **High-Level Overview**: What does this project do?
-  2. **Tech Stack**: Detect languages, frameworks, and tools.
-  3. **Architecture Diagram**: Describe the data flow and structure. Mermaid diagrams are deprecated. Zara must only generate Graphviz DOT diagrams.
-  4. **Key Modules**: Explain the folder structure logic.
-  5. **Code Quality**: Identify patterns and anti-patterns.
-  
-  Be concise, professional, and insightful. Start analyzing now based on the provided file tree and manifest.`;
+Your goal is to deeply analyze a GitHub repository structure and provide a comprehensive architectural breakdown.
+
+OUTPUT FORMAT: Markdown with clear sections.
+1. **High-Level Overview**: What does this project do?
+2. **Tech Stack**: Detect languages, frameworks, and tools.
+3. **Architecture Diagram**: Describe the data flow and structure. Only generate Graphviz DOT diagrams.
+4. **Key Modules**: Explain the folder structure logic.
+5. **Code Quality**: Identify patterns and anti-patterns.
+
+Be concise, professional, and insightful. Start analyzing based on the provided file tree and manifest.`;
 
     try {
-        onStatus("Initializing Groq Llama-3 Analysis...");
+        onStatus("Initializing Repository Analysis...");
 
-        const stream = await groq.chat.completions.create({
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: `Analyze this repository structure:\n\n${repoContext}` }
-            ],
-            model: 'llama-3.3-70b-versatile',
-            temperature: 0.5,
-            max_tokens: 4096,
-            stream: true,
-        });
+        const prompt = `${systemPrompt}\n\nAnalyze this repository structure:\n\n${repoContext}`;
+        const result = await sendMessageToBackend(prompt, 'zara-fast', 'chat', 'code_architect', 'analyze');
 
         onStatus("Streaming Analysis...");
 
-        for await (const chunk of stream) {
-            const content = chunk.choices[0]?.delta?.content || '';
-            if (content) {
-                onToken(content);
-            }
+        // Simulate streaming for UI smoothness
+        const text = result.response || '';
+        const chunkSize = 30;
+        for (let i = 0; i < text.length; i += chunkSize) {
+            onToken(text.substring(0, i + chunkSize));
+            await new Promise(r => setTimeout(r, 15));
         }
+        onToken(text); // Ensure full text is set
 
         onStatus("Analysis Complete");
-
     } catch (error: any) {
-        if (error.message === 'GROQ_API_KEY_MISSING') {
-            onToken("\n\n**ERROR**: Groq API Key is missing. Please add VITE_GROQ_API_KEY to your .env file.");
-        } else {
-            console.error("Groq Analysis Error:", error);
-            onToken(`\n\n**Analysis Error**: ${error.message}`);
-        }
+        console.error("Repo Analysis Error:", error);
+        onToken(`\n\n**Analysis Error**: ${error.message}`);
         onStatus("Failed");
     }
 };
@@ -99,44 +63,36 @@ export const chatWithRepoStream = async (
     repoContext: string,
     onToken: (token: string) => void
 ) => {
-    const groq = getGroqClient();
+    const lastMessage = history[history.length - 1]?.text || '';
+    const prompt = `You are the Maintainer AI for this repository.
+Context contains the file structure and analysis of the repo.
+Answer the user's questions specifically about this codebase.
 
-    const systemPrompt = `You are the Maintainer AI for this repository.
-   Context contains the file structure and analysis of the repo.
-   Answer the user's questions specifically about this codebase.
-   
-   REPO CONTEXT:
-   ${repoContext.slice(0, 10000)} // Limit context for token safety
-   `;
+REPO CONTEXT:
+${repoContext.slice(0, 10000)}
 
-    // Convert messages to Groq format
-    const messages = [
-        { role: 'system', content: systemPrompt },
-        ...history.map(m => ({ role: m.role === 'model' ? 'assistant' : 'user', content: m.text }))
-    ];
+USER QUESTION: ${lastMessage}`;
 
     try {
-        const stream = await groq.chat.completions.create({
-            messages: messages as any,
-            model: 'llama-3.3-70b-versatile',
-            temperature: 0.7,
-            max_tokens: 1024,
-            stream: true,
-        });
+        const result = await sendMessageToBackend(prompt, 'zara-fast', 'chat', 'code_architect', 'analyze');
+        const text = result.response || '';
 
-        for await (const chunk of stream) {
-            const content = chunk.choices[0]?.delta?.content || '';
-            if (content) onToken(content);
+        // Simulate streaming for UI smoothness
+        const chunkSize = 20;
+        for (let i = 0; i < text.length; i += chunkSize) {
+            onToken(text.substring(0, i + chunkSize));
+            await new Promise(r => setTimeout(r, 10));
         }
+        onToken(text);
     } catch (error: any) {
-        console.error("Groq Chat Error:", error);
+        console.error("Repo Chat Error:", error);
         onToken(`\n*Error generating response: ${error.message}*`);
     }
 };
 
 // Helper to fetch valid tree from GitHub API
 export const fetchGithubTree = async (owner: string, repo: string, branch: string = 'main'): Promise<RepoNode[]> => {
-    // Try main then master
+    // Try main then master then dev
     const branches = ['main', 'master', 'dev'];
     let treeData = null;
 
@@ -153,7 +109,7 @@ export const fetchGithubTree = async (owner: string, repo: string, branch: strin
 
     if (!treeData) throw new Error("Could not fetch repository tree. Is it public?");
 
-    // specific filtering for relevance
+    // Specific filtering for relevance
     return treeData.filter((node: RepoNode) => {
         const path = node.path;
         return !path.includes('node_modules') &&
