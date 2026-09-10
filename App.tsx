@@ -10,6 +10,7 @@ import { MagicLinkPage } from './MagicLinkPage';
 import { Sparkles, BookOpen, Heart, Code2, Palette, WifiOff, Globe, Search, ChevronDown, Brain, Upload, FileText, File, Menu, X, Loader2, Activity, Eye, EyeOff } from 'lucide-react';
 import { Message, Role, Attachment, ViewMode, ChatConfig, PersonalizationConfig, Persona } from './types';
 import { sendMessageToGeminiStream } from './services/gemini';
+import { getFriendlyChatError } from './services/chatService';
 import { OfflineService } from './services/offlineService';
 import { securityService } from './services/securityService';
 import { authService } from './services/authService';
@@ -168,6 +169,35 @@ const App: React.FC = () => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<boolean>(false);
 
+  // Sends `text` after `baseHistory` (the conversation so far) and streams the reply in
+  const runChat = async (baseHistory: Message[], text: string, attachments: Attachment[], analysisContext?: string) => {
+    if (isLoading) return;
+    abortRef.current = false;
+    const newUserMsg: Message = { id: crypto.randomUUID(), role: Role.USER, text, attachments, timestamp: Date.now() };
+    const msgsWithUser = [...baseHistory, newUserMsg];
+    setIsLoading(true);
+    const botMsgId = crypto.randomUUID();
+    const initialBotMsg: Message = { id: botMsgId, role: Role.MODEL, text: '', timestamp: Date.now(), isStreaming: true };
+    setMessages([...msgsWithUser, initialBotMsg]);
+
+    try {
+      const { text: finalText, sources } = await sendMessageToGeminiStream(
+        baseHistory, text, attachments, chatConfig, personalization,
+        (partial) => { if (!abortRef.current) setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, text: partial } : m)); },
+        undefined, async () => "Verified",
+        analysisContext,
+        currentSessionId || undefined
+      );
+      if (abortRef.current) return;
+      const finalBotMsg: Message = { ...initialBotMsg, text: finalText, sources, isStreaming: false };
+      const finalMessages = [...msgsWithUser, finalBotMsg];
+      setMessages(finalMessages);
+      if (currentSessionId) updateSession(currentSessionId, finalMessages); else createSession(finalMessages);
+    } catch (e: any) {
+      if (!abortRef.current) setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, isStreaming: false, isError: true, text: getFriendlyChatError(e) } : m));
+    } finally { setIsLoading(false); }
+  };
+
   const handleSendMessage = async (text: string, attachments: Attachment[], analysisContext?: string) => {
     trackEvent('chat_send', {
       has_attachments: attachments.length > 0,
@@ -175,36 +205,50 @@ const App: React.FC = () => {
       config: chatConfig.model
     });
     if (isLoading) return;
-    abortRef.current = false;
     let historyToUse = messages;
     if (editingMessage) {
       const idx = messages.findIndex(m => m.id === editingMessage.id);
       if (idx !== -1) historyToUse = messages.slice(0, idx);
       setEditingMessage(null);
     }
-    const newUserMsg = { id: crypto.randomUUID(), role: Role.USER, text, attachments, timestamp: Date.now() };
-    const msgsWithUser = [...historyToUse, newUserMsg];
-    setMessages(msgsWithUser);
-    setIsLoading(true);
-    const botMsgId = crypto.randomUUID();
-    const initialBotMsg = { id: botMsgId, role: Role.MODEL, text: '', timestamp: Date.now(), isStreaming: true };
-    setMessages([...msgsWithUser, initialBotMsg]);
+    await runChat(historyToUse, text, attachments, analysisContext);
+  };
 
+  const handleStop = () => {
+    abortRef.current = true;
+    setIsLoading(false);
+    // Finalize the in-flight reply so it doesn't keep "typing" forever
+    setMessages(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false, text: m.text || 'Stopped.' } : m));
+  };
+
+  const handleRegenerate = (botMessage: Message) => {
+    if (isLoading) return;
+    const botIdx = messages.findIndex(m => m.id === botMessage.id);
+    let userIdx = botIdx - 1;
+    while (userIdx >= 0 && messages[userIdx].role !== Role.USER) userIdx--;
+    if (botIdx < 0 || userIdx < 0) return;
+    const userMsg = messages[userIdx];
+    trackEvent('chat_regenerate', { config: chatConfig.model });
+    runChat(messages.slice(0, userIdx), userMsg.text, userMsg.attachments || []);
+  };
+
+  const handleFeedback = (message: Message, kind: 'like' | 'dislike') => {
+    trackEvent('message_feedback', { kind, config: chatConfig.model, length: message.text.length });
+  };
+
+  const handleShare = async (message: Message) => {
     try {
-      const { text: finalText, sources } = await sendMessageToGeminiStream(
-        historyToUse, text, attachments, chatConfig, personalization,
-        (partial) => { if (!abortRef.current) setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, text: partial } : m)); },
-        undefined, async () => "Verified",
-        analysisContext
-      );
-      if (abortRef.current) return;
-      const finalBotMsg = { ...initialBotMsg, text: finalText, sources, isStreaming: false };
-      const finalMessages = [...msgsWithUser, finalBotMsg];
-      setMessages(finalMessages);
-      if (currentSessionId) updateSession(currentSessionId, finalMessages); else createSession(finalMessages);
-    } catch (e: any) {
-      if (!abortRef.current) setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, isStreaming: false, isError: true, text: "Wait 30s..." } : m));
-    } finally { setIsLoading(false); }
+      if (navigator.share) await navigator.share({ title: 'Zara AI', text: message.text });
+      else await navigator.clipboard.writeText(message.text);
+    } catch { /* user cancelled share */ }
+  };
+
+  const handleBranch = (message: Message) => {
+    const idx = messages.findIndex(m => m.id === message.id);
+    if (idx < 0) return;
+    const branch = messages.slice(0, idx + 1).filter(m => !m.isStreaming);
+    createSession(branch);
+    setMessages(branch);
   };
 
   const handleTogglePrivacy = async (enabled: boolean) => {
@@ -243,7 +287,7 @@ const App: React.FC = () => {
       case 'dashboard': return withHeader(<HomeDashboard onViewChange={handleViewChange} onActivateCare={() => setChatConfig(p => ({ ...p, isEmotionalMode: true }))} />, "Dashboard");
       case 'student': return withHeader(<StudentMode />, "Tutor");
       case 'code': return withHeader(<CodeMode />, "Architect");
-      case 'live': return withHeader(<LiveMode personalization={personalization} />, "Live");
+      case 'live': return withHeader(<LiveMode personalization={personalization} chatModel={chatConfig.model} recentContext={messages} careMode={!!chatConfig.isEmotionalMode} />, "Live");
       case 'workspace': return withHeader(<ImageMode />, "Studio");
       case 'exam': return withHeader(<ExamMode />, "Exam");
       case 'analytics': return withHeader(<AnalyticsDashboard />, "Analytics");
@@ -284,6 +328,9 @@ const App: React.FC = () => {
                 <div className="flex items-center gap-3">
                   {currentUser && (
                     <button
+                      title={currentUser.is_privacy_mode ? 'Privacy mode on — chats are not saved' : 'Privacy mode off'}
+                      aria-label="Toggle privacy mode"
+                      aria-pressed={!!currentUser.is_privacy_mode}
                       onClick={() => handleTogglePrivacy(!currentUser.is_privacy_mode)}
                       className={`p-2 md:p-2.5 rounded-full transition-all border border-white/5 ${currentUser.is_privacy_mode ? 'bg-orange-500/10 text-orange-400 border-orange-500/20 shadow-[0_0_15px_rgba(251,146,60,0.2)]' : 'bg-white/5 text-white/40 hover:text-white'}`}
                     >
@@ -291,18 +338,27 @@ const App: React.FC = () => {
                     </button>
                   )}
                   <button
+                    title={chatConfig.isEmotionalMode ? 'Zara Care is on' : 'Turn on Zara Care (emotional support)'}
+                    aria-label="Toggle Zara Care"
+                    aria-pressed={!!chatConfig.isEmotionalMode}
                     onClick={() => setChatConfig(p => ({ ...p, isEmotionalMode: !p.isEmotionalMode }))}
                     className={`p-2 md:p-2.5 rounded-full transition-all border border-white/5 ${chatConfig.isEmotionalMode ? 'bg-purple-500/10 text-purple-400 border-purple-500/20 shadow-[0_0_20px_rgba(168,85,247,0.3)]' : 'bg-white/5 text-white/40 hover:text-white'}`}
                   >
                     <Heart className={`w-4 h-4 md:w-5 md:h-5 ${chatConfig.isEmotionalMode ? 'fill-current' : ''}`} />
                   </button>
                   <button
+                    title="Web search (not available in chat yet)"
+                    aria-label="Toggle web search (not available in chat yet)"
+                    aria-pressed={!!chatConfig.useGrounding}
                     onClick={() => setChatConfig(p => ({ ...p, useGrounding: !p.useGrounding }))}
                     className={`p-2 md:p-2.5 rounded-full transition-all border border-white/5 ${chatConfig.useGrounding ? 'bg-blue-500/10 text-blue-400 border-blue-500/20 shadow-[0_0_15px_rgba(59,130,246,0.2)]' : 'bg-white/5 text-white/40 hover:text-white'}`}
                   >
                     <Globe className="w-4 h-4 md:w-5 md:h-5" />
                   </button>
                   <button
+                    title={chatConfig.useThinking ? 'Deep thinking on — slower, more thorough answers' : 'Turn on deep thinking'}
+                    aria-label="Toggle deep thinking"
+                    aria-pressed={!!chatConfig.useThinking}
                     onClick={() => setChatConfig(p => ({ ...p, useThinking: !p.useThinking }))}
                     className={`p-2 md:p-2.5 rounded-full transition-all border border-white/5 ${chatConfig.useThinking ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20 shadow-[0_0_15px_rgba(99,102,241,0.2)]' : 'bg-white/5 text-white/40 hover:text-white'}`}
                   >
@@ -471,10 +527,10 @@ const App: React.FC = () => {
                         </div>
                       </div>
                     )
-                  ) : messages.map(msg => <MessageItem key={msg.id} message={msg} onEdit={setEditingMessage} onRegenerate={() => { }} onLike={() => { }} onDislike={() => { }} onShare={() => { }} onBranch={() => { }} />)}
+                  ) : messages.map(msg => <MessageItem key={msg.id} message={msg} onEdit={setEditingMessage} onRegenerate={handleRegenerate} onLike={(m) => handleFeedback(m, 'like')} onDislike={(m) => handleFeedback(m, 'dislike')} onShare={handleShare} onBranch={handleBranch} />)}
                 </div>
               </div>
-              <InputArea onSendMessage={handleSendMessage} onStop={() => { abortRef.current = true; setIsLoading(false); }} isLoading={isLoading} disabled={false} isOffline={!isOnline} editMessage={editingMessage} onCancelEdit={() => setEditingMessage(null)} viewMode={currentView} isEmotionalMode={chatConfig.isEmotionalMode} />
+              <InputArea onSendMessage={handleSendMessage} onStop={handleStop} isLoading={isLoading} disabled={false} isOffline={!isOnline} editMessage={editingMessage} onCancelEdit={() => setEditingMessage(null)} viewMode={currentView} isEmotionalMode={chatConfig.isEmotionalMode} />
             </div>
           </div>
         );
@@ -486,7 +542,7 @@ const App: React.FC = () => {
   if (isMagicLinkPage) return <div className="h-screen flex items-center justify-center w-full"><MagicLinkPage onLoginSuccess={handleLoginSuccess} /></div>;
 
   return (
-    <GoogleOAuthProvider clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID || ""}>
+    <GoogleOAuthProvider clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID || "not-configured"}>
       <div className="flex h-screen bg-background text-text overflow-hidden">
         <SEO title={seoData.title} description={seoData.description} />
         <Sidebar currentView={currentView} onViewChange={handleViewChange} isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} sessions={sessions} activeSessionId={currentSessionId} onNewChat={() => { clearCurrentSession(); setMessages([]); handleViewChange('chat'); }} onSelectSession={(id) => { setMessages(loadSession(id)); handleViewChange('chat'); }} onRenameSession={renameSession} onDeleteSession={deleteSession} onOpenFeedback={() => setIsFeedbackOpen(true)} currentUser={currentUser} onLogin={() => setIsAuthOpen(true)} onLogout={handleLogout} onTogglePrivacy={handleTogglePrivacy} />

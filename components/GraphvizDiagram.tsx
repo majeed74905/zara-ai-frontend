@@ -84,6 +84,41 @@ const GraphvizDiagram: React.FC<GraphvizDiagramProps> = ({ dot }) => {
     const handleMouseUp = () => setIsDragging(false);
     const handleMouseLeave = () => setIsDragging(false);
 
+    // ── Touch support (mobile): 1 finger = pan, 2 fingers = pinch-zoom ──
+    const pinchStart = useRef<{ dist: number; scale: number } | null>(null);
+
+    const touchDistance = (t: React.TouchList) => {
+        const dx = t[0].clientX - t[1].clientX;
+        const dy = t[0].clientY - t[1].clientY;
+        return Math.hypot(dx, dy);
+    };
+
+    const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+        if (e.touches.length === 2) {
+            pinchStart.current = { dist: touchDistance(e.touches), scale };
+        } else if (e.touches.length === 1) {
+            setIsDragging(true);
+            dragStart.current = { x: e.touches[0].clientX - position.x, y: e.touches[0].clientY - position.y };
+        }
+    };
+
+    const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+        if (e.touches.length === 2 && pinchStart.current) {
+            const ratio = touchDistance(e.touches) / pinchStart.current.dist;
+            setScale(Math.min(Math.max(0.1, pinchStart.current.scale * ratio), 5));
+        } else if (e.touches.length === 1 && isDragging) {
+            setPosition({
+                x: e.touches[0].clientX - dragStart.current.x,
+                y: e.touches[0].clientY - dragStart.current.y,
+            });
+        }
+    };
+
+    const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+        if (e.touches.length < 2) pinchStart.current = null;
+        if (e.touches.length === 0) setIsDragging(false);
+    };
+
     const zoomIn = () => setScale(prev => Math.min(prev * 1.2, 5));
     const zoomOut = () => setScale(prev => Math.max(prev * 0.8, 0.1));
     const resetZoom = () => {
@@ -116,6 +151,9 @@ const GraphvizDiagram: React.FC<GraphvizDiagramProps> = ({ dot }) => {
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
                 onMouseLeave={handleMouseLeave}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
                 style={{ touchAction: 'none' }} // Prevents browser scroll on touch
             >
                 {isLoading && (
@@ -151,8 +189,11 @@ const GraphvizDiagram: React.FC<GraphvizDiagramProps> = ({ dot }) => {
                 </div>
             </div>
             {/* Helper tip */}
-            <div className="absolute bottom-2 right-4 text-[10px] text-white/30 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="absolute bottom-2 right-4 text-[10px] text-white/30 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block">
                 Ctrl + Scroll to Zoom • Drag to Pan
+            </div>
+            <div className="absolute bottom-2 right-4 text-[10px] text-white/30 pointer-events-none sm:hidden">
+                Pinch to Zoom • Drag to Pan
             </div>
         </div>
     );

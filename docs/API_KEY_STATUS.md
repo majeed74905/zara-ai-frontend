@@ -2,13 +2,13 @@
 
 ## 🔑 API Key Configuration
 
-**New API Key:** `AIzaSyBSgML0tQw3qcoz7hjSyuyDJ-iZuNI_GD8`
+**New API Key:** `[REDACTED]`
 
 ### ✅ Updated Files:
 
 1. **`frontend/.env`**
-   - Old Key: `AIzaSyCoed5loHxkucic7iNYU6_CUY_b7J5uA-c`
-   - New Key: `AIzaSyBSgML0tQw3qcoz7hjSyuyDJ-iZuNI_GD8`
+   - Old Key: `[REDACTED]`
+   - New Key: `[REDACTED]`
    - Status: ✅ **UPDATED**
 
 ## 🧪 API Key Validation
@@ -90,7 +90,7 @@ Once the frontend server is fully started, open your browser to:
 
 Open browser DevTools (F12) and check for:
 ```
-[Gemini Service - REST] API_KEY status: Loaded (AIzaSyBSgM...)
+[Gemini Service - REST] API_KEY status: Loaded ([REDACTED])
 [Gemini REST] Attempt 1/4: Using Gemini 2.5 Flash (0/5 RPM, 0/20 RPD)
 [Gemini REST] ✓ Successfully completed with Gemini 2.5 Flash
 ```

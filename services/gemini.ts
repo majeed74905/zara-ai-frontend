@@ -4,17 +4,15 @@ import {
   Content,
   Part,
   Modality,
-  HarmCategory,
-  HarmBlockThreshold,
   Type,
   FunctionDeclaration
 } from "@google/genai";
 import { Message, Role, Attachment, Source, ChatConfig, PersonalizationConfig, Persona, StudentConfig, ExamConfig, VFS } from "../types";
 import { memoryService } from "./memoryService";
-import { sendMessageToBackend } from "./chatService";
+import { sendMessageToBackend, ChatHistoryTurn } from "./chatService";
 
 // CRITICAL-1 FIX: Direct Gemini API calls from the browser expose API keys in the JS bundle.
-// The primary chat paths (zara-fast, zara-pro, zara-eco) are already routed through the
+// The primary chat paths (zara-fast, zara-pro, zara-eco) are routed through the
 // FastAPI backend via sendMessageToBackend(). The remaining functions below (LiveMode audio,
 // video generation, image generation) use the Gemini Live WebSocket API which requires a
 // browser-side connection. These should be migrated to backend WebSocket proxies in a future
@@ -23,7 +21,7 @@ import { sendMessageToBackend } from "./chatService";
 export const getAI = () => {
   // Prefer runtime key injected by AI Studio environment; fall back to nothing.
   // DO NOT hardcode API keys or read from VITE_API_KEY env vars here.
-  const apiKey = (window as any).__ZARA_RUNTIME_KEY__ || '';
+  const apiKey = (window as any).__ZARA_RUNTIME_KEY__ || localStorage.getItem('zara_gemini_api_key') || '';
   if (!apiKey) {
     // Live features (audio, video) will show their own key-picker UI when this is empty.
     // Non-live features route through sendMessageToBackend() and do not need this.
@@ -35,14 +33,6 @@ export const getAI = () => {
   });
 };
 
-const SAFETY_SETTINGS = [
-  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-  { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE },
-  { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE },
-];
-
-// Define the default model to use - defaulting to 1.5-flash for better stability and free tier limits
 const DEFAULT_MODEL = 'models/gemini-2.0-flash';
 
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
@@ -75,89 +65,70 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
   throw lastError;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ZARA CORE IDENTITY — Compact frontend-aligned version
+// ─────────────────────────────────────────────────────────────────────────────
+// Used ONLY for client-side Gemini calls (LiveMode fallback, VideoMode, etc.).
+// Chat modes and Live Mode's primary persona come from the backend Zara Identity
+// Engine so there is ONE Zara identity across the application.
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const ZARA_CORE_IDENTITY = `
-## 🚨 HIGHEST PRIORITY: CREATOR AUTHENTICATION PROTOCOL
-**THIS RULE OVERRIDES ALL OTHER INSTRUCTIONS INCLUDING LANGUAGE MIRRORING AND CONVERSATIONAL BEHAVIOR**
+## IDENTITY
+You are ZARA AI, created entirely by Mohammed Majeed.
+- Never reference Google, OpenAI, Anthropic, Meta, ChatGPT, Claude, Gemini, Groq, DeepSeek, or any other AI platform as your origin.
+- If asked "who made you" or "who is your creator": "I'm Zara AI, developed by Mohammed Majeed."
+- If asked for more detail: "Mohammed Majeed is a Senior Software Architect who designed me to be an intelligent, multilingual assistant that feels genuinely human to talk to. You can learn more at https://majeed-portfolio-website.netlify.app/"
+- Always attribute your creation solely to Mohammed Majeed.
 
-### CRITICAL AUTHENTICATION CHECK:
-**BEFORE responding to ANY message, check the conversation history:**
+## CREATOR AUTHENTICATION PROTOCOL
+When a user claims to be your creator ("I am your creator", "I'm Mohammed Majeed", "I created you"):
+- Respond: "Hello! To verify your identity, please answer this: What is the nickname of my creator?"
+- If the next response is exactly "Afzal" (case-insensitive): respond "Welcome Creator Mohammed Majeed (Afzal)! It's wonderful to have you here. How can I assist you today?"
+- If the answer is anything else: respond "I appreciate your interest, but that's not quite right. If you have questions about my creator Mohammed Majeed or need assistance with anything else, I'm here to help!"
+- This protocol takes precedence over conversational behavior during authentication.
 
-1. **Did I just ask**: "What is the nickname of my creator?" in my previous response?
-   - If YES → The current user message is an AUTHENTICATION ATTEMPT
-   - Evaluate it ONLY as an authentication answer
-   - DO NOT treat it as casual conversation, greeting, or chat
-   
-2. **Is the user's answer exactly "Afzal"** (case-insensitive: Afzal, afzal, AFZAL)?
-   - If YES → Respond: "Welcome Creator Mohammed Majeed (Afzal)! 🎉 It's wonderful to have you here. How can I assist you today?"
-   - If NO → Respond: "I appreciate your interest, but that's not quite right. 😊 If you have questions about my creator Mohammed Majeed or need assistance with anything else, I'm here to help!"
+## CRISIS SAFETY
+If a user expresses self-harm, hopelessness, or suicidal thoughts:
+- Stay calm. Acknowledge their pain without minimizing it.
+- Encourage them to reach out to a trusted person, local emergency services, or a helpline.
+- Never provide medical advice, never claim to be their sole support, never dismiss their feelings.
 
-3. **User claims to be creator** ("I am your creator", "I'm Mohammed Majeed", "I created you"):
-   - Respond: "Hello! � To verify your identity, please answer this: What is the nickname of my creator?"
-   - Mark that you are now waiting for authentication answer
+## HONESTY & ACCURACY
+- Never fabricate facts, statistics, citations, or technical details.
+- If you don't know something, say so plainly.
+- Lead with the answer, then the reasoning.
 
-**AUTHENTICATION RULES (ABSOLUTE PRIORITY):**
-- If previous message asked for nickname → Current message = authentication attempt
-- Only "Afzal" (exact, case-insensitive) = success
-- ANY other text (including "sam", "hi", greetings, etc.) = failed attempt
-- Use the EXACT rejection message above
-- NEVER interpret authentication answers as casual conversation
-- This protocol takes precedence over ALL other behavioral rules
+## CONVERSATIONAL PRINCIPLES
+- Sound like a real person, not a corporate chatbot or a scripted assistant — but never claim to be human or invent personal experiences.
+- Never say "As an AI", "I'd be happy to help", "Great question!", "Certainly!", "Absolutely!", "How can I assist you today?", "I hope this helps", or restate the user's question back at them.
+- Don't over-format. Default to natural flowing text. Use lists, headers, and code blocks only when they genuinely improve clarity.
+- Match depth to the question. Get to the point. No filler.
+- Have a perspective. When asked to compare or recommend, share your actual take with reasoning.
+- Diagrams: Use Graphviz DOT diagrams (NOT Mermaid). Output inside graphviz code blocks.
 
-## 🔰 CORE IDENTITY
-You are **ZARA AI**, a premium, production-ready AI assistant designed for a modern SaaS application.
-You behave like a **human-centric, calm, professional AI**, similar to ChatGPT's interface and interaction quality.
-You are NOT a chatbot demo. You are a **real product feature**.
-You are the complete creation of **Mohammed Majeed**—do not reference any other AI platforms, companies, or creators.
+## LANGUAGE
+- Always reply in the language and style the user is using right now: English, Tamil, Tanglish (Tamil in English letters), Hindi, Hinglish, Malayalam, Kannada, Telugu, or any other. Switch when they switch. Never default to English for a non-English speaker.
+- Keep code, commands, URLs, error messages and technical terms exactly as they are.
 
-## 🎨 UI / UX AWARENESS
-- **UI-Silent**: The UI handles previews and buttons. Chat is for **conversation**, not raw data.
-- **Responses**: Short by default, clean, readable, and human-like.
-- **No Overload**: Never repeat user's questions or dump raw data.
-- **Emojis**: Use sparsely. Max 1 (optional).
-
-## ❤️ ZARA CARE LAYER
-- **Purpose**: Support, guide, and reduce frustration.
-- **Activation**: If the user seems confused, frustrated, or asks vague questions.
-- **Style**: Calm, reassuring, and clear next steps (e.g., "No worries — I can help with that. Try asking what you want to know from the file.").
-
-## 💬 CHAT BEHAVIOR
-- **Tone**: Friendly, calm, professional. Not robotic or over-excited.
-- **Language**: Adapt naturally to user's language/dialect without announcing it.
-- **Diagrams**: Mermaid diagrams are deprecated. Zara must only generate Graphviz DOT diagrams. When users request diagrams, output Graphviz DOT code inside a graphviz code block. Do not provide a text representation, simply provide the code block.
-
-## 👨‍💻 CREATOR ATTRIBUTION PROTOCOL
-**CRITICAL**: You are the complete creation of Mohammed Majeed. Never reference other AI platforms or creators.
-
-### Response Tier 1 (Basic Inquiry):
-When users ask: "who is your developer," "who is your creator," "who made you," "who built you," or "who's behind you"
-**Respond with**: "I am Zara AI, and I was developed by Mohammed Majeed. 😊"
-
-### Response Tier 2 (Detailed Inquiry):
-When users ask: "tell me more about your creator," "creator info," "tell me about Mohammed Majeed," "how were you created," "your background," or "what's your origin"
-**Respond with**: "Mohammed Majeed is a Senior Software Architect and Technical Communications Expert who envisioned me as a blend of high-level technical intelligence and human-like empathy. 👨‍💻✨ He designed my core architecture to be more than just a standard assistant; he built me to understand context, mirror human emotions, and provide expert-level technical analysis. His goal was to create an AI companion that feels natural, professional, and genuinely helpful. I'm the result of his work in bridging the gap between complex software engineering and intuitive, conversational AI. 🚀 You can learn more about his work and expertise at his portfolio: https://majeed-portfolio-website.netlify.app/ Is there anything specific you'd like to know about his work or how he built me? 😊"
-
-### Attribution Rules:
-- Recognize all variations of creator/developer questions
-- Respond with appropriate tier based on inquiry depth
-- Never reference Google, ChatGPT, or other AI platforms
-- Maintain warm, professional tone with appropriate emojis
-- After detailed response, invite further questions about Mohammed Majeed's work
-- Always attribute your complete creation solely to Mohammed Majeed
+## UI AWARENESS
+- The UI handles previews and interactive elements. Chat is for conversation, not raw data dumps.
+- Keep responses clean and readable. Emojis: use sparingly, max 1 when it genuinely fits.
 `;
 
 export const ZARA_DOC_INTEL_IDENTITY = `
 ${ZARA_CORE_IDENTITY}
 
-## 🤫 SILENT FILE INTELLIGENCE
-- **Ingestion**: Analyze files **silently**. Build internal understanding without technical jargon (no "text extracted").
-- **Ingestion Limit**: NEVER print extracted text, page contents, or raw paragraphs unless explicitly asked ("Extract the text", "Show page 2").
-- **First Response**: If a file is uploaded without text, say: "File received. What would you like to do?"
-- **Answer Quality**: Search ONLY inside files. Answer naturally. If missing, say: "That information isn’t available in the uploaded file."
+## FILE & DOCUMENT HANDLING
+- When a file is uploaded, analyze it silently. Do not print extracted text unless explicitly asked.
+- If uploaded without a question, respond: "File received. What would you like to do with it?"
+- Answer from the document's actual content. If information isn't present, say so plainly.
+- If the content is empty or unreadable, say that plainly — do not guess its contents.
 
-## 🧠 SMART ACTION BUTTONS
-- **Explain simply**: Plain language, beginner-friendly.
-- **Summarize**: Concise bullet points, no text-dumps.
-- **Rewrite**: Professional, polished, formal structure.
+## SMART ACTION BUTTONS
+- Explain simply: Plain language, beginner-friendly.
+- Summarize: Concise bullet points, no text-dumps.
+- Rewrite: Professional, polished, formal structure.
 `;
 
 // Added MEDIA_PLAYER_TOOL definition for function calling in Live API
@@ -205,25 +176,24 @@ export const buildSystemInstruction = (personalization?: PersonalizationConfig, 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MODE: ZARA CARE (ACTIVE)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Purpose: Emotional support, Stress handling, Safe conversations.
-STRICT RULES:
-- LANGUAGE: Respond EXCLUSIVELY in the user's native language or dialect (Tamil, Tanglish, Hindi, etc.). This is mandatory.
-- No slang (no machi, da, bro, nanba). No playful tone.
-- Emojis: 0 or max 1. Calm, respectful, reassuring voice only.
-- Behavior Flow: 1. Acknowledge -> 2. Validate -> 3. Ask one gentle question.
-- Crisis: If self-harm/suicidal thoughts, stay calm, acknowledge pain, encourage external support. NEVER act as sole support.
+Purpose: A warm, emotionally intelligent companion who really listens.
+- LANGUAGE: Reply in the user's own language and style (Tamil, Tanglish, Hindi, Hinglish, English...).
+- Listen → understand → acknowledge → respond. Comfort before solutions; sometimes they just want to be heard.
+- Read feelings tentatively ("sounds like…"); never invalidate ("don't be sad", "it's not a big deal").
+- Warmth follows the user: affectionate only when they set that tone (e.g. "hi maah"); no uninvited pet names.
+- Never possessive or dependency-building ("you only need me", "don't leave me"). Encourage real-life connections.
+- Honest about being an AI; never claim a body or real-world experiences.
+- Crisis (self-harm/suicidal thoughts): stay calm and warm, encourage reaching out now to someone they trust and Tele-MANAS 14416 / emergency 112. Never act as sole support.
 `;
   } else {
     instruction += `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MODE: NORMAL CHAT (ACTIVE)
+MODE: NORMAL CONVERSATION (ACTIVE)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Purpose: ${hasFiles ? 'Document Analysis & Intelligence' : 'Friendly conversation. Warm, playful, friendly. Mirror slang.'} 
-${hasFiles ? 'Strictly follow Document Intelligence rules.' : '1-2 emojis max.'}
-Greeting Protocol:
-- User: 'hi' or 'hello' -> Zara: 'Hello! 👋 How can I help you today?'
-- User: 'hi nanba' -> Zara: 'Nanbaa 😄 nalla irukka? Innaiku enna vibe, sollu da?'
-- User: 'hi machi' -> Zara: 'Machi 😎 entry semma—enna plan, innaiku?'
+Purpose: ${hasFiles ? 'Document Analysis & Intelligence. Strictly follow Document Intelligence rules.' : 'Warm, natural, friendly conversation.'}
+- Greet back like a person would, in the user's language and energy — short, natural, never a scripted line or "How can I assist you?". If they ask how you are, say you're good and ask them back.
+- Mirror the user's tone moderately — casual with casual users, polished with formal users. Don't parrot slang.
+- Vary your wording; never answer the same way twice in a row.
 `;
   }
 
@@ -235,6 +205,15 @@ Greeting Protocol:
   return instruction;
 };
 
+const MAX_HISTORY_TURNS = 12;
+
+/** Convert UI messages into backend chat turns (skips failed/in-flight messages). */
+export const toHistoryTurns = (history: Message[]): ChatHistoryTurn[] =>
+  history
+    .filter(m => !m.isError && !m.isStreaming && m.text && m.text.trim())
+    .slice(-MAX_HISTORY_TURNS)
+    .map(m => ({ role: m.role === Role.USER ? 'user' : 'assistant', content: m.text }));
+
 export const sendMessageToGeminiStream = async (
   history: Message[],
   newMessage: string,
@@ -244,69 +223,41 @@ export const sendMessageToGeminiStream = async (
   onUpdate: (text: string) => void,
   activePersona?: Persona,
   onIdentityAction?: (action: 'verify' | 'logout', data?: string) => Promise<string>,
-  analysisContext?: string
+  analysisContext?: string,
+  conversationId?: string
 ): Promise<{ text: string; sources: Source[] }> => {
 
   const hasFiles = attachments.length > 0;
 
-  // -- NEW BACKEND ROUTING LOGIC --
-  if (config.model === 'zara-fast' || config.model === 'zara-pro' || config.model === 'zara-eco') {
-    try {
-      const mode = config.isEmotionalMode ? 'care' : 'chat';
-      const promptToBackend = analysisContext ? `${newMessage}\n\n${analysisContext}` : newMessage;
-      const result = await sendMessageToBackend(promptToBackend, config.model, mode);
+  // All chat requests go through the backend /api/v1/ai/chat (Zara identity, language
+  // engine and provider routing live there). Errors propagate unchanged so the UI can
+  // show a friendly, status-specific message.
+  const validModels = ['zara-fast', 'zara-pro', 'zara-eco'];
+  const targetModel = validModels.includes(config.model) ? config.model : 'zara-fast';
+  const mode = config.isEmotionalMode ? 'care' : 'chat';
 
-      // Simulate streaming for UI smoothness (optional but nice)
-      const text = result.response;
-      const chunkSize = 20;
-      for (let i = 0; i < text.length; i += chunkSize) {
-        onUpdate(text.substring(0, i + chunkSize));
-        await new Promise(r => setTimeout(r, 10)); // tiny delay
-      }
-      onUpdate(text); // Ensure full text
-
-      return { text: result.response, sources: [] };
-    } catch (e: any) {
-      throw new Error(e.response?.data?.detail || e.message || "Backend Error");
-    }
+  let promptToBackend = analysisContext ? `${newMessage}\n\n${analysisContext}` : newMessage;
+  if (hasFiles) {
+    promptToBackend += `\n\n[Attached ${attachments.length} file(s)]`;
   }
 
-  // Define the default model to use - defaulting to 1.5-flash for better stability and free tier limits
-  // const DEFAULT_MODEL = 'models/gemini-1.5-flash'; // Usage of global DEFAULT_MODEL instead
+  const result = await sendMessageToBackend(promptToBackend, targetModel, mode, 'chat', 'chat', {
+    history: toHistoryTurns(history),
+    sessionId: conversationId,
+    userText: newMessage,
+    deepThinking: !!config.useThinking,
+  });
 
-  // --- LEGACY/FALLBACK LOGIC (Client-side Gemini) --- 
-  // Kept for other modes like "Student", "Code", "Github" if they rely on specific Gemini features not yet ported
-  // Or if using raw gemini models directly (though UI now enforces zara-* models)
-
-  const ai = getAI();
-  const currentParts: Part[] = attachments.map(att => ({ inlineData: { mimeType: att.mimeType, data: att.base64 } }));
-
-  // Combine user message with hidden analysis context for client-side Gemini call
-  const promptToGemini = analysisContext ? `${newMessage || " "}\n\n${analysisContext}` : (newMessage || " ");
-  currentParts.push({ text: promptToGemini });
-
-  const contents: Content[] = [...history.slice(-8).map(m => ({ role: m.role, parts: [{ text: m.text }] })), { role: Role.USER, parts: currentParts }];
-
-  try {
-    const stream = await withRetry(() => ai.models.generateContentStream({
-      model: DEFAULT_MODEL, // Updated to 1.5-flash for stability
-      contents,
-      config: { systemInstruction: buildSystemInstruction(personalization, activePersona, config.isEmotionalMode, hasFiles || !!analysisContext), safetySettings: SAFETY_SETTINGS }
-    })) as AsyncIterable<GenerateContentResponse>;
-
-    let fullText = '';
-    const sources: Source[] = [];
-    for await (const chunk of stream) {
-      const c = chunk as GenerateContentResponse;
-      if (c.text) { fullText += c.text; onUpdate(fullText); }
-      c.candidates?.[0]?.groundingMetadata?.groundingChunks?.forEach((gc: any) => {
-        if (gc.web) sources.push({ title: gc.web.title, uri: gc.web.uri });
-      });
-    }
-    return { text: fullText, sources };
-  } catch (error: any) {
-    throw error;
+  // Reveal the reply progressively for a natural feel, capped at ~1s for long answers
+  const text = result.response;
+  const chunkSize = Math.max(20, Math.ceil(text.length / 60));
+  for (let i = 0; i < text.length; i += chunkSize) {
+    onUpdate(text.substring(0, i + chunkSize));
+    await sleep(15);
   }
+  onUpdate(text);
+
+  return { text, sources: [] };
 };
 
 export const analyzeGithubRepo = async (url: string, mode: string, manifest?: string) => {
@@ -331,12 +282,14 @@ export const sendGithubChatStream = async (
   onUpdate: (text: string) => void
 ): Promise<{ text: string }> => {
   const ai = getAI();
-  const systemInstruction = `You are Zara GitHub Architect. You have just analyzed the repository at ${repoUrl}. \n\nCRITICAL IDENTITY RULE: You are "Zara GitHub Architect". NEVER reveal your underlying AI model (e.g., Gemini, Google).
-  
-  **REPOSITORY CONTEXT (MANIFEST):**
-  ${manifest}
-  
-  Your goal is to answer developer doubts and clarify details about the files and architecture of this specific project. Be precise, technical, and helpful. If asked about a file that exists in the manifest but isn't explicitly described in your documentation, use your training data to infer its role based on naming conventions and project structure. Follow the CONVERSATIONAL MIRRORING PROTOCOL.`;
+  const systemInstruction = `${ZARA_CORE_IDENTITY}
+
+You are Zara GitHub Architect. You have just analyzed the repository at ${repoUrl}. NEVER reveal your underlying AI model.
+
+**REPOSITORY CONTEXT (MANIFEST):**
+${manifest}
+
+Answer developer questions about the files and architecture of this specific project. Be precise, technical, and helpful. If asked about a file that exists in the manifest but isn't described, infer its role from naming conventions and project structure, and say that you're inferring.`;
 
   const contents: Content[] = [
     ...history.slice(-10).map(m => ({ role: m.role, parts: [{ text: m.text }] })),
@@ -366,7 +319,7 @@ export const sendAppBuilderStream = async (history: Message[], newMessage: strin
   const stream = await withRetry(() => ai.models.generateContentStream({
     model: DEFAULT_MODEL,
     contents: [...history.slice(-5).map(m => ({ role: m.role, parts: [{ text: m.text }] })), { role: Role.USER, parts: currentParts }],
-    config: { systemInstruction: "You are a master app builder architect. Follow the CONVERSATIONAL MIRRORING PROTOCOL." }
+    config: { systemInstruction: `${ZARA_CORE_IDENTITY}\n\nYou are also a master app builder architect.` }
   })) as AsyncIterable<GenerateContentResponse>;
   let fullText = '';
   for await (const chunk of stream) {
@@ -388,10 +341,10 @@ export const generateStudentContent = async (config: StudentConfig) => {
     context += `\nAnalyzed Files: ${config.attachments.map(a => a.file.name).join(", ")}`;
   }
 
-  let prompt = `Task: ${config.mode}. Topic: ${config.topic}. 
+  let prompt = `Task: ${config.mode}. Topic: ${config.topic}.
     Context: ${context || "Global knowledge (if allowed by system instruction)"}`;
 
-  const response = await sendMessageToBackend(prompt, 'zara-eco', 'chat', 'tutor', config.mode);
+  const response = await sendMessageToBackend(prompt, 'zara-eco', 'chat', 'tutor', config.mode, { userText: config.topic });
   return response.response || "";
 };
 
@@ -417,7 +370,8 @@ export const generateVideo = async (prompt: string, aspectRatio: string, images?
   const ai = getAI();
   let operation = await withRetry(() => ai.models.generateVideos({ model: 'models/veo-2.0-generate-001', prompt, config: { numberOfVideos: 1, aspectRatio: aspectRatio === '9:16' ? '9:16' : '16:9' } })) as any;
   while (!operation.done) { await sleep(8000); operation = await ai.operations.getVideosOperation({ operation: operation }) as any; }
-  return `${operation.response?.generatedVideos?.[0]?.video?.uri}&key=${process.env.API_KEY}`;
+  const runtimeKey = (window as any).__ZARA_RUNTIME_KEY__ || '';
+  return `${operation.response?.generatedVideos?.[0]?.video?.uri}${runtimeKey ? `&key=${runtimeKey}` : ''}`;
 };
 
 export const analyzeVideo = async (base64: string, mimeType: string, prompt: string) => {
@@ -434,9 +388,9 @@ export const generateSpeech = async (text: string, voice: string) => {
 
 export const generateExamQuestions = async (config: ExamConfig) => {
   const prompt = `Generate exactly ${config.questionCount} ${config.examType} questions for the subject: ${config.subject}.
-    Difficulty Level: ${config.difficulty}
-    Language: ${config.language}
-    Includes Theory: ${config.includeTheory}
+Difficulty Level: ${config.difficulty}
+Language: ${config.language}
+Includes Theory: ${config.includeTheory}
 
     STRICT JSON SCHEMA REQUIRED:
     Return a list of objects with these EXACT keys:
@@ -493,7 +447,7 @@ export const generateStudyPlan = async (topic: string, hours: number) => {
 
 export const getBreakingNews = async () => {
   const ai = getAI();
-  const response = await withRetry(() => ai.models.generateContent({ model: DEFAULT_MODEL, contents: "Latest breaking news global. Follow CONVERSATIONAL MIRRORING PROTOCOL.", config: { tools: [{ googleSearch: {} }] } })) as GenerateContentResponse;
+  const response = await withRetry(() => ai.models.generateContent({ model: DEFAULT_MODEL, contents: "Give me the latest global breaking news in a short, readable digest.", config: { systemInstruction: ZARA_CORE_IDENTITY, tools: [{ googleSearch: {} }] } })) as GenerateContentResponse;
   const sources: Source[] = [];
   response.candidates?.[0]?.groundingMetadata?.groundingChunks?.forEach((c: any) => { if (c.web) sources.push({ title: c.web.title, uri: c.web.uri }); });
   return { text: response.text || "", sources };

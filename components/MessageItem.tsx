@@ -5,6 +5,27 @@ import { Bot, User, FileText, ExternalLink, Volume2, Square, Copy, Check, Pencil
 import { DiagramSystem } from './DiagramSystem';
 import GraphvizDiagram from './GraphvizDiagram';
 
+// Pick a speech-synthesis language from the dominant script of the text
+const SCRIPT_LANGS: Array<[RegExp, string]> = [
+  [/[஀-௿]/g, 'ta-IN'],
+  [/[ऀ-ॿ]/g, 'hi-IN'],
+  [/[ഀ-ൿ]/g, 'ml-IN'],
+  [/[ಀ-೿]/g, 'kn-IN'],
+  [/[ఀ-౿]/g, 'te-IN'],
+  [/[ঀ-৿]/g, 'bn-IN'],
+  [/[؀-ۿ]/g, 'ar'],
+];
+
+const speechLangFor = (text: string): string => {
+  let best = 'en-IN';
+  let bestCount = 0;
+  for (const [re, lang] of SCRIPT_LANGS) {
+    const count = (text.match(re) || []).length;
+    if (count > bestCount) { best = lang; bestCount = count; }
+  }
+  return bestCount >= 3 ? best : 'en-IN';
+};
+
 interface MessageItemProps {
   message: Message;
   onEdit?: (message: Message) => void;
@@ -102,14 +123,20 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   const handleSpeak = () => {
     window.speechSynthesis.cancel();
     const cleanText = message.text
+      .replace(/```[\s\S]*?```/g, ' ')
       .replace(/[*_#`]/g, '')
       .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
       .replace(/\[.*?\]/g, '');
 
     const newUtterance = new SpeechSynthesisUtterance(cleanText);
+    const lang = speechLangFor(cleanText);
+    newUtterance.lang = lang;
     const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find(v => v.name.includes('Google') && v.lang.startsWith('en'))
-      || voices.find(v => v.lang.startsWith('en'));
+    const base = lang.split('-')[0];
+    const preferredVoice = voices.find(v => v.lang === lang && v.name.includes('Google'))
+      || voices.find(v => v.lang === lang)
+      || voices.find(v => v.lang.startsWith(base))
+      || (base === 'en' ? voices.find(v => v.lang.startsWith('en')) : undefined);
     if (preferredVoice) newUtterance.voice = preferredVoice;
     newUtterance.rate = speed;
     newUtterance.onend = () => { setIsSpeaking(false); setUtterance(null); };
@@ -142,7 +169,23 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   };
 
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [feedback, setFeedback] = useState<'like' | 'dislike' | null>(null);
+  const [copiedMessage, setCopiedMessage] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const handleCopyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(message.text);
+      setCopiedMessage(true);
+      setTimeout(() => setCopiedMessage(false), 1500);
+    } catch { /* clipboard blocked */ }
+  };
+
+  const handleFeedbackClick = (kind: 'like' | 'dislike') => {
+    if (feedback === kind) return;
+    setFeedback(kind);
+    if (kind === 'like') onLike?.(message); else onDislike?.(message);
+  };
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -259,7 +302,15 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                   {message.isStreaming && <span className="inline-block w-2.5 h-2.5 rounded-full bg-text-sub ml-1 animate-pulse align-baseline" />}
                 </div>
               )}
-              {message.isError && <p className="text-red-400 text-sm mt-2 animate-pulse">Error sending message.</p>}
+              {message.isError && onRegenerate && (
+                <button
+                  onClick={() => onRegenerate(message)}
+                  className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-white/5 hover:bg-white/10 border border-white/10 text-text transition-colors"
+                  aria-label="Try sending again"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Try again
+                </button>
+              )}
             </div>
           </div>
 
@@ -277,35 +328,37 @@ export const MessageItem: React.FC<MessageItemProps> = ({
           )}
 
           {!isUser && !message.isError && (
-            <div className="mt-2 ml-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="mt-2 ml-1 flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100 transition-opacity">
               {/* Like / Dislike */}
               <button
-                onClick={() => onLike?.(message)}
-                className="p-1.5 rounded-lg text-text-sub hover:text-green-400 hover:bg-surfaceHighlight transition-colors"
+                onClick={() => handleFeedbackClick('like')}
+                className={`p-1.5 rounded-lg hover:bg-surfaceHighlight transition-colors ${feedback === 'like' ? 'text-green-400' : 'text-text-sub hover:text-green-400'}`}
                 title="Like response"
+                aria-label="Like response"
+                aria-pressed={feedback === 'like'}
               >
-                <ThumbsUp className="w-4 h-4" />
+                <ThumbsUp className={`w-4 h-4 ${feedback === 'like' ? 'fill-current' : ''}`} />
               </button>
               <button
-                onClick={() => onDislike?.(message)}
-                className="p-1.5 rounded-lg text-text-sub hover:text-red-400 hover:bg-surfaceHighlight transition-colors"
+                onClick={() => handleFeedbackClick('dislike')}
+                className={`p-1.5 rounded-lg hover:bg-surfaceHighlight transition-colors ${feedback === 'dislike' ? 'text-red-400' : 'text-text-sub hover:text-red-400'}`}
                 title="Dislike response"
+                aria-label="Dislike response"
+                aria-pressed={feedback === 'dislike'}
               >
-                <ThumbsDown className="w-4 h-4" />
+                <ThumbsDown className={`w-4 h-4 ${feedback === 'dislike' ? 'fill-current' : ''}`} />
               </button>
 
               <div className="w-px h-3 bg-white/5 mx-1" />
 
               {/* Copy */}
               <button
-                onClick={() => {
-                  navigator.clipboard.writeText(message.text);
-                  // Optional: trigger a small "Copied" alert or icon change elsewhere
-                }}
+                onClick={handleCopyMessage}
                 className="p-1.5 rounded-lg text-text-sub hover:text-text hover:bg-surfaceHighlight transition-colors"
-                title="Copy response"
+                title={copiedMessage ? 'Copied' : 'Copy response'}
+                aria-label={copiedMessage ? 'Copied' : 'Copy response'}
               >
-                <Copy className="w-4 h-4" />
+                {copiedMessage ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
               </button>
 
               {/* Share */}
@@ -313,6 +366,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                 onClick={() => onShare?.(message)}
                 className="p-1.5 rounded-lg text-text-sub hover:text-blue-400 hover:bg-surfaceHighlight transition-colors"
                 title="Share response"
+                aria-label="Share response"
               >
                 <Share2 className="w-4 h-4" />
               </button>
@@ -322,6 +376,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                 onClick={() => onRegenerate?.(message)}
                 className="p-1.5 rounded-lg text-text-sub hover:text-primary hover:bg-surfaceHighlight transition-colors"
                 title="Regenerate response"
+                aria-label="Regenerate response"
               >
                 <RefreshCw className="w-4 h-4" />
               </button>
@@ -332,6 +387,8 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                   onClick={() => setShowMoreMenu(!showMoreMenu)}
                   className={`p-1.5 rounded-lg transition-colors ${showMoreMenu ? 'text-primary bg-surfaceHighlight' : 'text-text-sub hover:text-text hover:bg-surfaceHighlight'}`}
                   title="More options"
+                  aria-label="More options"
+                  aria-expanded={showMoreMenu}
                 >
                   <MoreHorizontal className="w-4 h-4" />
                 </button>

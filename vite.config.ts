@@ -10,9 +10,6 @@ export default defineConfig(({ mode }) => {
   // Set the third parameter to '' to load all env regardless of the `VITE_` prefix.
   const env = loadEnv(mode, process.cwd(), '');
 
-  console.log('[Vite Config] Loading environment variables...');
-  console.log('[Vite Config] API_KEY:', env.API_KEY ? `Found (${env.API_KEY.substring(0, 10)}...)` : 'NOT FOUND');
-
   return {
     plugins: [react()],
     resolve: {
@@ -21,7 +18,6 @@ export default defineConfig(({ mode }) => {
       },
     },
     define: {
-      'process.env.API_KEY': JSON.stringify(env.API_KEY || ''),
       'process.env.VITE_API_URL': JSON.stringify(env.VITE_API_URL || 'http://localhost:8000/api/v1'),
     },
     server: {

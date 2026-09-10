@@ -2,7 +2,6 @@
 import React, { useState } from 'react';
 import { X, Mail, Lock, Key, ArrowRight, Loader2, AlertCircle, CheckCircle, UserPlus, LogIn } from 'lucide-react';
 import { authService } from '../services/authService';
-import { useGoogleLogin } from '@react-oauth/google';
 
 interface AuthModalProps {
     isOpen: boolean;
@@ -21,30 +20,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onLoginSu
     const [successMsg, setSuccessMsg] = useState<string | null>(null);
     const [resetToken, setResetToken] = useState('');
     const [newPassword, setNewPassword] = useState('');
-
-    const googleLogin = useGoogleLogin({
-        onSuccess: async (tokenResponse) => {
-            setIsLoading(true);
-            setError(null);
-            try {
-                // Here tokenResponse.access_token is the OAuth token, but usually backend needs a code or id_token.
-                // However, @react-oauth/google standard flow gives access_token. 
-                // For direct id_token, we use the GoogleLogin component or the implicit flow.
-                // I will use a custom implementation that handles the token.
-                const res = await authService.googleLogin(tokenResponse.access_token);
-                // The backend currently expects an id_token for verify_oauth2_token. 
-                // I'll adjust the backend to handle the access token or use the id token if possible.
-                // For now I'll assume standard OIDC.
-                onLoginSuccess(res.access_token, res.email || "Google User");
-                onClose();
-            } catch (err: any) {
-                setError(err.message);
-            } finally {
-                setIsLoading(false);
-            }
-        },
-        onError: () => setError("Google Login Failed"),
-    });
 
     if (!isOpen) return null;
 

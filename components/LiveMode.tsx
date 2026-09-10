@@ -1,14 +1,21 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Mic, MicOff, Radio, AlertTriangle, User, Sparkles, Activity, WifiOff, X, Music, Youtube, RefreshCw, ExternalLink, Loader2, Key } from 'lucide-react';
-import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
+import { Modality, LiveServerMessage } from "@google/genai";
 import { buildSystemInstruction, MEDIA_PLAYER_TOOL } from '../services/gemini';
 import { LiveSessionManager } from '../services/LiveSessionManager';
+import { API_URL } from '../services/apiConfig';
 import { float32ToInt16, base64ToUint8Array, decodeAudioData, arrayBufferToBase64 } from '../utils/audioUtils';
-import { PersonalizationConfig, MediaAction } from '../types';
+import { PersonalizationConfig, MediaAction, Message, Role } from '../types';
 
 interface LiveModeProps {
   personalization: PersonalizationConfig;
+  /** Selected Zara model in Chat (zara-fast | zara-pro | zara-eco) — Live uses the same personality. */
+  chatModel?: string;
+  /** Current chat conversation, so Live can continue it. */
+  recentContext?: Message[];
+  /** Zara Care (emotional companion) is active in Chat — Live keeps it. */
+  careMode?: boolean;
 }
 
 interface LiveMessage {
@@ -17,7 +24,77 @@ interface LiveMessage {
   text: string;
 }
 
-export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
+const MODEL_LABELS: Record<string, string> = {
+  'zara-fast': 'Zara Fast',
+  'zara-pro': 'Zara Pro',
+  'zara-eco': 'Zara Eco',
+};
+
+// Used only when the backend persona endpoint is unreachable
+const FALLBACK_VOICE_RULES = `
+## VOICE CONVERSATION (LIVE MODE)
+You are talking out loud in real time. Short spoken sentences, no markdown, no lists, no emojis, no URLs read aloud.
+Keep turns short so the user can jump in; if interrupted, respond to what they just said.
+Understand what they're doing (greeting, small talk, sharing a feeling, asking something) and reply proportionally — a greeting gets a short, natural greeting back in their language and energy (never a scripted line, never "How can I assist you?"). If they ask how you are, say you're good and ask them back. If they greet and then ask something, greet in a word and answer it.
+
+## SPOKEN LANGUAGE LOCK
+Reply in the SAME language and style the user is speaking on every turn — Tamil, Tanglish, Hindi, Hinglish, Malayalam, Kannada, Telugu, English or any other. Switch immediately when they switch. Never default to English for a non-English speaker.`;
+
+const friendlyLiveError = (err: any): { message: string; needsKey?: boolean } => {
+  const name = err?.name || '';
+  const raw = String(err?.message || err || '').toLowerCase();
+  if (name === 'NotAllowedError' || name === 'SecurityError' || raw.includes('permission denied')) {
+    return { message: "Microphone access is blocked. Allow mic permission for this site in your browser, then tap Reconnect." };
+  }
+  if (name === 'NotFoundError' || raw.includes('requested device not found')) {
+    return { message: "No microphone found. Connect a mic and try again." };
+  }
+  if (name === 'NotReadableError') {
+    return { message: "Your microphone is being used by another app. Close it and try again." };
+  }
+  if (raw.includes('requested entity was not found') || raw.includes('api key') || raw.includes('permission_denied') || raw.includes('unauthenticated')) {
+    return { message: "That Gemini API key doesn't have access to Live voice. Please check or replace the key.", needsKey: true };
+  }
+  if (raw.includes('quota') || raw.includes('resource_exhausted') || raw.includes('429')) {
+    return { message: "The voice service is busy or out of quota right now. Please try again in a minute." };
+  }
+  if (!navigator.onLine || raw.includes('network') || raw.includes('failed to fetch')) {
+    return { message: "Connection lost. Check your internet and tap Reconnect." };
+  }
+  return { message: "Couldn't keep the voice session running. Tap Reconnect to try again." };
+};
+
+const toContextTurns = (messages?: Message[]) =>
+  (messages || [])
+    .filter(m => !m.isError && !m.isStreaming && m.text?.trim())
+    .slice(-8)
+    .map(m => ({ role: m.role === Role.USER ? 'user' : 'assistant', content: m.text.slice(0, 1500) }));
+
+const fetchVoicePersona = async (model: string, recentContext: Message[] | undefined, careMode: boolean): Promise<string | null> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch(`${API_URL}/ai/persona`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        interaction_mode: careMode ? 'care' : 'chat',
+        recent_context: toContextTurns(recentContext),
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data?.system_instruction === 'string' ? data.system_instruction : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel = 'zara-fast', recentContext, careMode = false }) => {
   const [isActive, setIsActive] = useState(false);
   const [status, setStatus] = useState('Ready');
   const [volume, setVolume] = useState(0);
@@ -30,6 +107,7 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
   // Refs for connection management
   const isMountedRef = useRef(true);
   const liveSessionRef = useRef<LiveSessionManager | null>(null);
+  const userEndedRef = useRef(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -39,18 +117,18 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
   const nextStartTimeRef = useRef<number>(0);
   const audioQueueRef = useRef<AudioBufferSourceNode[]>([]);
   const processingQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // When true, the next transcription chunk starts a new bubble (turn finished or interrupted)
+  const turnBoundaryRef = useRef(true);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  const modelLabel = `${MODEL_LABELS[chatModel] || 'Zara'}${careMode ? ' · Care' : ''}`;
 
   useEffect(() => {
-    scrollToBottom();
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const cleanup = () => {
+  const cleanup = (finalStatus: string = 'Ready') => {
     setIsActive(false);
 
     if (liveSessionRef.current) {
@@ -87,13 +165,14 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
     });
     audioQueueRef.current = [];
     nextStartTimeRef.current = 0;
+    turnBoundaryRef.current = true;
 
     processingQueueRef.current = Promise.resolve();
 
     if (isMountedRef.current) {
       setIsAiSpeaking(false);
       setVolume(0);
-      setStatus('Ready');
+      setStatus(finalStatus);
     }
   };
 
@@ -150,6 +229,9 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
     };
   };
 
+  const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('zara_gemini_api_key') || '');
+  const [hasSavedKey, setHasSavedKey] = useState(() => Boolean(localStorage.getItem('zara_gemini_api_key') || (window as any).__ZARA_RUNTIME_KEY__));
+
   const handleKeySelection = async () => {
     if (window.aistudio && window.aistudio.openSelectKey) {
       await window.aistudio.openSelectKey();
@@ -159,14 +241,66 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
     }
   };
 
+  const handleSaveCustomKey = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = apiKeyInput.trim();
+    if (!trimmed) {
+      setError("Please enter a valid Gemini API key.");
+      return;
+    }
+    localStorage.setItem('zara_gemini_api_key', trimmed);
+    setHasSavedKey(true);
+    setShowKeyPicker(false);
+    setError(null);
+    setTimeout(() => {
+      connect();
+    }, 50);
+  };
+
+  const handleClearKey = () => {
+    localStorage.removeItem('zara_gemini_api_key');
+    setApiKeyInput('');
+    setHasSavedKey(false);
+    cleanup();
+  };
+
+  const reportError = (err: any) => {
+    const { message, needsKey } = friendlyLiveError(err);
+    console.error("Live session error:", err);
+    if (isMountedRef.current) {
+      setError(message);
+      if (needsKey) setShowKeyPicker(true);
+    }
+  };
+
+  const appendTranscript = (role: 'user' | 'model', text: string) => {
+    setMessages(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === role && !turnBoundaryRef.current) {
+        return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+      }
+      turnBoundaryRef.current = false;
+      return [...prev, { id: crypto.randomUUID(), role, text }];
+    });
+  };
+
   const connect = async () => {
     if (!navigator.onLine) {
-      setError("No internet connection.");
+      setError("You're offline. Check your internet connection and try again.");
+      return;
+    }
+
+    const apiKey = localStorage.getItem('zara_gemini_api_key') || (window as any).__ZARA_RUNTIME_KEY__ || '';
+    if (!apiKey) {
+      setShowKeyPicker(true);
+      setStatus('Ready');
+      setIsActive(false);
       return;
     }
 
     // Cleanup previous session if any
     cleanup();
+    userEndedRef.current = false;
 
     setError(null);
     setShowKeyPicker(false);
@@ -185,7 +319,10 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
 
       nextStartTimeRef.current = outputCtx.currentTime;
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Echo cancellation keeps Zara from hearing (and answering) her own voice
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
       mediaStreamRef.current = stream;
 
       const indiaTime = new Date().toLocaleString('en-IN', {
@@ -196,7 +333,20 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
 
       setStatus('Connecting...');
 
-      const apiKey = process.env.API_KEY || ''; // Ensure key exists
+      // Same Zara identity + selected model personality (+ Care) as Chat, with chat context
+      const persona = await fetchVoicePersona(chatModel, recentContext, careMode)
+        || `${buildSystemInstruction(personalization, undefined, careMode)}\n${FALLBACK_VOICE_RULES}`;
+
+      if (!isMountedRef.current || inputCtx.state === 'closed') return;
+
+      const nickname = personalization?.nickname ? `\n5. **USER NAME**: ${personalization.nickname}.` : '';
+      const systemInstruction = `${persona}
+
+**UP-TO-DATE CONTEXT (CRITICAL):**
+1. **CURRENT TIME**: Today is ${indiaTime}.
+2. **LOCATION**: User is in India.
+3. **ACCURACY**: If the user asks for the date, day, or time, use the above information exactly.
+4. **MEDIA**: When the user asks to play a song or video, use the play_media tool.${nickname}`;
 
       const sessionManager = new LiveSessionManager(
         apiKey,
@@ -209,23 +359,18 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
           },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: buildSystemInstruction(personalization) +
-            `\n\n**UP-TO-DATE CONTEXT (CRITICAL):**
-                  1. **CURRENT TIME**: Today is ${indiaTime}.
-                  2. **LOCATION**: User is in India.
-                  3. **ACCURACY**: If the user asks for the date, day, or time, use the above information exactly.
-                  4. **IDENTITY**: You are Zara, an advanced AI companion. Maintain fluent native-like conversation.`
+          systemInstruction,
         },
         {
           onOpen: () => {
-            if (isMountedRef.current) setStatus('Online');
+            if (isMountedRef.current) setStatus('Listening');
           },
           onMessage: (message: LiveServerMessage) => {
-            if (message.toolCall) {
+            if (message.toolCall?.functionCalls) {
               for (const call of message.toolCall.functionCalls) {
                 if (call.name === 'play_media') {
                   const args = call.args as any;
-                  let url = args.platform === 'spotify'
+                  const url = args.platform === 'spotify'
                     ? `https://open.spotify.com/search/${encodeURIComponent(args.query)}`
                     : `https://www.youtube.com/results?search_query=${encodeURIComponent(args.query)}`;
 
@@ -252,105 +397,96 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
                 .catch(() => { });
             }
 
-            let role: 'user' | 'model' | null = null;
-            let text = '';
-            if (message.serverContent?.inputTranscription) {
-              role = 'user';
-              text = message.serverContent.inputTranscription.text;
-            } else if (message.serverContent?.outputTranscription) {
-              role = 'model';
-              text = message.serverContent.outputTranscription.text;
+            if (isMountedRef.current) {
+              const inputText = message.serverContent?.inputTranscription?.text;
+              const outputText = message.serverContent?.outputTranscription?.text;
+              if (inputText) appendTranscript('user', inputText);
+              if (outputText) appendTranscript('model', outputText);
             }
 
-            if (role && text && isMountedRef.current) {
-              setMessages(prev => {
-                const last = prev[prev.length - 1];
-                if (last && last.role === role) {
-                  return [...prev.slice(0, -1), { ...last, text: last.text + text }];
-                }
-                return [...prev, { id: crypto.randomUUID(), role, text }];
-              });
+            if (message.serverContent?.turnComplete) {
+              turnBoundaryRef.current = true;
             }
 
             if (message.serverContent?.interrupted) {
+              // User started talking: stop Zara immediately so she never talks over them
               processingQueueRef.current = Promise.resolve();
               audioQueueRef.current.forEach(s => { try { s.stop(); } catch (e) { } });
               audioQueueRef.current = [];
               if (audioContextRef.current) nextStartTimeRef.current = audioContextRef.current.currentTime;
+              turnBoundaryRef.current = true;
               if (isMountedRef.current) setIsAiSpeaking(false);
             }
           },
           onError: (e: any) => {
-            console.error("Live API Session Error:", e);
-            const errorMsg = e.message || String(e);
-            if (isMountedRef.current) {
-              if (errorMsg.includes("Requested entity was not found")) {
-                setError("Model or API Key access denied. Please select a valid key.");
-                setShowKeyPicker(true);
-              } else {
-                setError(`Connection Error: ${errorMsg}`);
-              }
-              setStatus("Failed");
-            }
-            cleanup();
+            reportError(e);
+            cleanup('Disconnected');
           },
           onClose: (e: CloseEvent) => {
             console.log(`Live API Closed: Code=${e.code}, Reason=${e.reason}, Clean=${e.wasClean}`);
-            if (isMountedRef.current) {
-              setStatus("Disconnected");
+            if (!userEndedRef.current && isMountedRef.current) {
+              if (e.code !== 1000) {
+                reportError({ message: e.reason || 'network' });
+              } else {
+                setError("The voice session ended. Tap Reconnect to continue.");
+              }
             }
-            cleanup();
+            cleanup(userEndedRef.current ? 'Ready' : 'Disconnected');
           }
         }
       );
 
       liveSessionRef.current = sessionManager;
 
-      // Use connect to align with the new manager's robust method
       await sessionManager.connect();
 
-      const source = inputCtx.createMediaStreamSource(stream);
-      const processor = inputCtx.createScriptProcessor(2048, 1, 1);
-      processorRef.current = processor;
-      source.connect(processor);
-      processor.connect(inputCtx.destination);
+      if (!isMountedRef.current || inputCtx.state === 'closed' || !sessionManager.isConnected) {
+        return;
+      }
 
-      processor.onaudioprocess = (e) => {
-        let inputData = e.inputBuffer.getChannelData(0);
+      try {
+        const source = inputCtx.createMediaStreamSource(stream);
+        const processor = inputCtx.createScriptProcessor(2048, 1, 1);
+        processorRef.current = processor;
+        source.connect(processor);
+        processor.connect(inputCtx.destination);
 
-        if (isMountedRef.current) {
+        processor.onaudioprocess = (e) => {
+          if (!isMountedRef.current || !liveSessionRef.current) return;
+          let inputData = e.inputBuffer.getChannelData(0);
+
           let sum = 0;
           for (let i = 0; i < inputData.length; i += 16) sum += inputData[i] * inputData[i];
           setVolume(Math.sqrt(sum / (inputData.length / 16)) * 5);
-        }
 
-        if (inputCtx.sampleRate !== 16000) {
-          inputData = downsampleBuffer(inputData, inputCtx.sampleRate, 16000);
-        }
-        const pcmData = float32ToInt16(inputData);
-        const pcmBase64 = arrayBufferToBase64(pcmData.buffer);
+          if (inputCtx.sampleRate !== 16000) {
+            inputData = downsampleBuffer(inputData, inputCtx.sampleRate, 16000);
+          }
+          const pcmData = float32ToInt16(inputData);
+          const pcmBase64 = arrayBufferToBase64(pcmData.buffer);
 
-        if (liveSessionRef.current) {
-          liveSessionRef.current.sendRealtimeInput({
+          liveSessionRef.current?.sendRealtimeInput({
             media: { mimeType: 'audio/pcm;rate=16000', data: pcmBase64 }
           });
-        }
-      };
+        };
+      } catch (nodeErr) {
+        console.warn("Audio processing node setup skipped (context closed or unavailable):", nodeErr);
+      }
 
     } catch (e: any) {
-      console.error("Live API Connection Failed:", e);
-      const errorMsg = e.message || String(e);
-      if (isMountedRef.current) {
-        setStatus('Failed');
-        setError(errorMsg);
-      }
-      cleanup();
+      reportError(e);
+      cleanup('Disconnected');
     }
+  };
+
+  const endSession = () => {
+    userEndedRef.current = true;
+    cleanup('Ready');
   };
 
   const toggleConnection = () => {
     if (isActive) {
-      cleanup();
+      endSession();
     } else {
       connect();
     }
@@ -362,30 +498,31 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
       {/* Header Visualizer */}
       <div className={`flex-shrink-0 flex flex-col items-center justify-center transition-all duration-300 bg-gradient-to-b from-surfaceHighlight/30 to-transparent ${messages.length > 0 ? 'h-[180px]' : 'h-[300px]'}`}>
 
-        <div className="flex items-center gap-3 mb-8">
-          <div className={`w-2.5 h-2.5 rounded-full shadow-[0_0_10px_currentColor] ${isActive ? 'bg-green-500 text-green-500 animate-pulse' : error ? 'bg-red-500 text-red-500' : 'bg-gray-400 text-gray-400'}`} />
+        <div className="flex items-center gap-3 mb-8 px-4" role="status" aria-live="polite">
+          <div className={`w-2.5 h-2.5 flex-shrink-0 rounded-full shadow-[0_0_10px_currentColor] ${isActive ? 'bg-green-500 text-green-500 animate-pulse' : error ? 'bg-red-500 text-red-500' : 'bg-gray-400 text-gray-400'}`} />
           <div className="text-text-sub font-mono text-sm flex items-center gap-2">
             {error ? (
               <span className="text-red-400 font-bold flex items-center gap-1">
-                <AlertTriangle className="w-3.5 h-3.5" />
+                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
                 {error}
               </span>
             ) : (isAiSpeaking ? (
               <span className="text-primary font-bold flex items-center gap-1.5">
                 <Activity className="w-4 h-4 animate-bounce" />
-                Speaking...
+                {modelLabel} is speaking...
               </span>
             ) : (
               <span className="flex items-center gap-2 font-medium">
-                {status === 'Connecting...' && <Loader2 className="w-3 h-3 animate-spin" />}
+                {(status === 'Connecting...' || status === 'Initializing...') && <Loader2 className="w-3 h-3 animate-spin" />}
                 <span className="opacity-70">{status}</span>
+                <span className="opacity-40 text-xs">· {modelLabel}</span>
               </span>
             ))}
           </div>
         </div>
 
         {/* Pulse Visualizer */}
-        <div className="relative flex items-center justify-center">
+        <div className="relative flex items-center justify-center" aria-hidden="true">
           <div className={`absolute left-1/2 top-1/2 -ml-24 -mt-24 rounded-full border border-primary/20 transition-transform duration-[50ms] ease-linear will-change-transform`}
             style={{ width: '192px', height: '192px', transform: `scale(${1 + volume * 0.3})` }} />
 
@@ -412,22 +549,82 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
 
       {/* Key Selection Prompt */}
       {showKeyPicker && (
-        <div className="absolute inset-0 z-[60] bg-black/80 backdrop-blur-md flex items-center justify-center p-6 animate-fade-in">
-          <div className="bg-surface border border-white/10 rounded-[2rem] p-8 max-w-sm w-full text-center shadow-2xl">
+        <div className="absolute inset-0 z-[60] bg-black/80 backdrop-blur-md flex items-center justify-center p-6 animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="live-key-title">
+          <div className="bg-surface border border-white/10 rounded-[2rem] p-8 max-w-md w-full text-center shadow-2xl relative">
+            <button
+              onClick={() => {
+                setShowKeyPicker(false);
+                if (isActive) cleanup();
+              }}
+              className="absolute top-4 right-4 p-2 text-text-sub hover:text-text rounded-full hover:bg-white/5 transition-colors"
+              aria-label="Close"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
             <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mx-auto mb-6 text-primary">
               <Key className="w-8 h-8" />
             </div>
-            <h3 className="text-xl font-bold mb-3">API Key Required</h3>
-            <p className="text-text-sub text-sm mb-8 leading-relaxed">
-              To use Live Studio, you must select an API key from a paid GCP project.
-              <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="text-primary hover:underline ml-1">Learn about billing</a>
+            <h3 id="live-key-title" className="text-xl font-bold mb-2">Gemini API Key Required</h3>
+            <p className="text-text-sub text-sm mb-6 leading-relaxed">
+              Live Voice Mode streams real-time audio through Gemini Multimodal Live API. Paste your Gemini API key below to connect. It is stored only in your browser.
             </p>
-            <button
-              onClick={handleKeySelection}
-              className="w-full bg-primary hover:bg-primary-dark text-white py-4 rounded-xl font-bold transition-all shadow-lg shadow-primary/20 active:scale-95"
-            >
-              Select API Key
-            </button>
+
+            <form onSubmit={handleSaveCustomKey} className="space-y-4 text-left">
+              <div>
+                <label htmlFor="live-api-key" className="block text-xs font-mono text-text-sub uppercase tracking-wider mb-2">
+                  Gemini API Key
+                </label>
+                <input
+                  id="live-api-key"
+                  type="password"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="AIzaSy..."
+                  className="w-full px-4 py-3 bg-surfaceHighlight/50 border border-white/15 rounded-xl text-text placeholder-text-sub/40 focus:outline-none focus:border-primary font-mono text-sm"
+                  autoFocus
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="submit"
+                  className="flex-1 bg-primary hover:bg-primary-dark text-white py-3.5 rounded-xl font-bold transition-all shadow-lg shadow-primary/20 active:scale-95 text-sm"
+                >
+                  Save & Connect
+                </button>
+                {hasSavedKey && (
+                  <button
+                    type="button"
+                    onClick={handleClearKey}
+                    className="px-4 py-3.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-xl font-medium transition-all text-xs"
+                  >
+                    Clear Key
+                  </button>
+                )}
+              </div>
+
+              {window.aistudio && window.aistudio.openSelectKey && (
+                <button
+                  type="button"
+                  onClick={handleKeySelection}
+                  className="w-full bg-white/5 hover:bg-white/10 text-text py-2.5 rounded-xl text-xs font-medium transition-colors border border-white/10"
+                >
+                  Select via Google AI Studio
+                </button>
+              )}
+
+              <div className="pt-2 text-center">
+                <a
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-primary hover:underline text-xs inline-flex items-center gap-1"
+                >
+                  Get a free Gemini API key <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -450,10 +647,11 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
               target="_blank"
               rel="noopener noreferrer"
               className="bg-primary hover:bg-primary-dark text-white p-3 rounded-full shadow-lg"
+              aria-label={`Open ${mediaCard.title}`}
             >
               <ExternalLink className="w-5 h-5" />
             </a>
-            <button onClick={() => setMediaCard(null)} className="text-text-sub hover:text-text p-1">
+            <button onClick={() => setMediaCard(null)} className="text-text-sub hover:text-text p-1" aria-label="Dismiss">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -461,10 +659,15 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
       )}
 
       {/* Transcription Messages */}
-      <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 space-y-4 relative custom-scrollbar">
+      <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 space-y-4 relative custom-scrollbar" aria-live="polite">
         {messages.length === 0 && isActive && (
           <div className="text-center text-text-sub/40 mt-10 animate-pulse">
-            <p>Listening for your voice...</p>
+            <p>Go ahead, I'm listening — speak in any language.</p>
+          </div>
+        )}
+        {messages.length === 0 && !isActive && !error && (
+          <div className="text-center text-text-sub/50 mt-10 text-sm px-6">
+            <p>Talk to {modelLabel} out loud. English, Tamil, Tanglish, Hindi and more — Zara replies in the language you speak.</p>
           </div>
         )}
         {messages.map((msg) => (
@@ -487,7 +690,7 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization }) => {
 
       {/* Footer Controls */}
       <div className="flex-shrink-0 p-6 bg-surface/30 backdrop-blur border-t border-border flex flex-col items-center gap-3">
-        {error && !showKeyPicker && (
+        {error && !showKeyPicker && !isActive && (
           <button onClick={() => { setError(null); connect(); }} className="flex items-center gap-2 text-xs bg-surfaceHighlight hover:bg-surface px-4 py-2 rounded-lg border border-white/10 mb-2">
             <RefreshCw className="w-3 h-3" /> Reconnect
           </button>

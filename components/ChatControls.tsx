@@ -35,9 +35,9 @@ export const ChatControls: React.FC<ChatControlsProps> = ({ config, setConfig, c
           onChange={handleModelChange}
           className="appearance-none bg-surfaceHighlight border border-white/10 text-text text-sm font-medium rounded-full pl-4 pr-10 py-2 focus:outline-none cursor-pointer hover:bg-surface transition-all shadow-sm"
         >
-          <option value="zara-fast">Zara Fast</option>
-          <option value="zara-pro">Zara Pro</option>
-          <option value="zara-eco">Zara Eco</option>
+          <option value="zara-fast">Zara Fast — Quick & conversational</option>
+          <option value="zara-pro">Zara Pro — Deep & expert</option>
+          <option value="zara-eco">Zara Eco — Efficient & concise</option>
         </select>
         <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-sub pointer-events-none" />
       </div>

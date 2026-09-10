@@ -111,7 +111,8 @@ export const InputArea: React.FC<InputAreaProps> = ({
       const recognition = new SpeechRecognition();
       recognition.continuous = true;
       recognition.interimResults = true;
-      recognition.lang = 'en-US';
+      // Prefer an Indian locale the browser advertises (ta-IN, hi-IN...), else Indian English
+      recognition.lang = (navigator.languages || []).find(l => /-IN$/i.test(l)) || 'en-IN';
 
       recognition.onstart = () => setIsListening(true);
       recognition.onresult = (event: any) => {

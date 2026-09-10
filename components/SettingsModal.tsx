@@ -80,38 +80,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-surface border border-border rounded-xl w-full max-w-4xl h-[700px] shadow-2xl flex overflow-hidden animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-4">
+      <div className="bg-surface border border-border rounded-xl w-full max-w-4xl h-[90vh] md:h-[700px] shadow-2xl flex flex-col md:flex-row overflow-hidden animate-fade-in">
 
         {/* Sidebar */}
-        <div className="w-64 bg-surfaceHighlight border-r border-border flex flex-col p-4">
-          <h2 className="text-lg font-bold text-text mb-6 px-3">Settings</h2>
+        <div className="w-full md:w-64 bg-surfaceHighlight border-b md:border-b-0 md:border-r border-border flex flex-col p-3 md:p-4 flex-shrink-0">
+          <div className="flex items-center justify-between mb-2 md:mb-6">
+            <h2 className="text-lg font-bold text-text px-3">Settings</h2>
+            <button onClick={onClose} aria-label="Close settings" className="md:hidden p-1.5 text-text-sub hover:text-text rounded-lg"><X className="w-5 h-5" /></button>
+          </div>
 
-          <nav className="space-y-1 flex-1">
+          <nav className="flex md:flex-col gap-1 md:space-y-1 flex-1 overflow-x-auto scrollbar-hide">
             <button
               onClick={() => setActiveTab('system')}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'system' ? 'bg-primary/10 text-primary' : 'text-text-sub hover:bg-white/5 hover:text-text'
+              className={`flex-shrink-0 md:w-full whitespace-nowrap flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'system' ? 'bg-primary/10 text-primary' : 'text-text-sub hover:bg-white/5 hover:text-text'
                 }`}
             >
               <Monitor className="w-4 h-4" /> System & UI
             </button>
             <button
               onClick={() => setActiveTab('personalization')}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'personalization' ? 'bg-primary/10 text-primary' : 'text-text-sub hover:bg-white/5 hover:text-text'
+              className={`flex-shrink-0 md:w-full whitespace-nowrap flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'personalization' ? 'bg-primary/10 text-primary' : 'text-text-sub hover:bg-white/5 hover:text-text'
                 }`}
             >
               <User className="w-4 h-4" /> Personalization
             </button>
             <button
               onClick={() => setActiveTab('personas')}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'personas' ? 'bg-primary/10 text-primary' : 'text-text-sub hover:bg-white/5 hover:text-text'
+              className={`flex-shrink-0 md:w-full whitespace-nowrap flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'personas' ? 'bg-primary/10 text-primary' : 'text-text-sub hover:bg-white/5 hover:text-text'
                 }`}
             >
               <UserPlus className="w-4 h-4" /> AI Personas
             </button>
           </nav>
 
-          <div className="mt-auto border-t border-border pt-4 px-2 space-y-2">
+          <div className="mt-auto border-t border-border pt-4 px-2 space-y-2 hidden md:block">
             <div className="text-[10px] text-text-sub text-center">{APP_VERSION}</div>
             <button onClick={onClose} className="w-full flex items-center justify-center gap-2 text-text-sub hover:text-text text-sm transition-colors py-2">
               <X className="w-4 h-4" /> Close
@@ -120,8 +123,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Content Area */}
-        <div className="flex-1 flex flex-col bg-background">
-          <div className="flex-1 overflow-y-auto p-8">
+        <div className="flex-1 flex flex-col bg-background min-h-0">
+          <div className="flex-1 overflow-y-auto p-5 md:p-8">
 
             {activeTab === 'system' && (
               <div className="space-y-8 max-w-2xl">
