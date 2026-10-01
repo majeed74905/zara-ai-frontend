@@ -16,16 +16,21 @@ export class LiveSessionManager {
     private model: string;
     private config: any;
 
+    private apiVersion?: string;
+
     constructor(
         apiKey: string,
         model: string,
         config: any,
-        callbacks: LiveSessionCallbacks
+        callbacks: LiveSessionCallbacks,
+        /** Ephemeral tokens minted by the backend require the v1alpha API. */
+        apiVersion?: string
     ) {
         this.apiKey = apiKey;
         this.model = model;
         this.config = config;
         this.callbacks = callbacks;
+        this.apiVersion = apiVersion;
     }
 
     public async connect() {
@@ -33,7 +38,11 @@ export class LiveSessionManager {
 
         try {
             this.isActive = true;
-            const ai = new GoogleGenAI({ apiKey: this.apiKey });
+            const ai = new GoogleGenAI(
+                this.apiVersion
+                    ? { apiKey: this.apiKey, httpOptions: { apiVersion: this.apiVersion } }
+                    : { apiKey: this.apiKey }
+            );
 
             // We pass callbacks directly to connect as per SDK usage
             const session = await ai.live.connect({

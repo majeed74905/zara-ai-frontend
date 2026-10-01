@@ -40,7 +40,7 @@ Understand what they're doing (greeting, small talk, sharing a feeling, asking s
 ## SPOKEN LANGUAGE LOCK
 Reply in the SAME language and style the user is speaking on every turn — Tamil, Tanglish, Hindi, Hinglish, Malayalam, Kannada, Telugu, English or any other. Switch immediately when they switch. Never default to English for a non-English speaker.`;
 
-const friendlyLiveError = (err: any): { message: string; needsKey?: boolean } => {
+const friendlyLiveError = (err: any): { message: string } => {
   const name = err?.name || '';
   const raw = String(err?.message || err || '').toLowerCase();
   if (name === 'NotAllowedError' || name === 'SecurityError' || raw.includes('permission denied')) {
@@ -52,8 +52,9 @@ const friendlyLiveError = (err: any): { message: string; needsKey?: boolean } =>
   if (name === 'NotReadableError') {
     return { message: "Your microphone is being used by another app. Close it and try again." };
   }
-  if (raw.includes('requested entity was not found') || raw.includes('api key') || raw.includes('permission_denied') || raw.includes('unauthenticated')) {
-    return { message: "That Gemini API key doesn't have access to Live voice. Please check or replace the key.", needsKey: true };
+  if (raw.includes('requested entity was not found') || raw.includes('api key') || raw.includes('permission_denied')
+      || raw.includes('unauthenticated') || raw.includes('live voice')) {
+    return { message: "Live voice isn't available right now. Please try again in a moment." };
   }
   if (raw.includes('quota') || raw.includes('resource_exhausted') || raw.includes('429')) {
     return { message: "The voice service is busy or out of quota right now. Please try again in a minute." };
@@ -94,13 +95,31 @@ const fetchVoicePersona = async (model: string, recentContext: Message[] | undef
   }
 };
 
+/**
+ * Short-lived, single-use Gemini Live token minted by OUR backend from its own key.
+ * The real API key never reaches the browser, and users never have to paste one.
+ */
+const fetchLiveToken = async (): Promise<{ token: string; model: string }> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_URL}/ai/live-token`, { method: 'POST', signal: controller.signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.token || !data?.model) {
+      throw new Error(data?.detail || 'Live voice is unavailable right now.');
+    }
+    return { token: data.token, model: data.model };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel = 'zara-fast', recentContext, careMode = false }) => {
   const [isActive, setIsActive] = useState(false);
   const [status, setStatus] = useState('Ready');
   const [volume, setVolume] = useState(0);
   const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [showKeyPicker, setShowKeyPicker] = useState(false);
   const [mediaCard, setMediaCard] = useState<MediaAction | null>(null);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
 
@@ -229,48 +248,10 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
     };
   };
 
-  const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('zara_gemini_api_key') || '');
-  const [hasSavedKey, setHasSavedKey] = useState(() => Boolean(localStorage.getItem('zara_gemini_api_key') || (window as any).__ZARA_RUNTIME_KEY__));
-
-  const handleKeySelection = async () => {
-    if (window.aistudio && window.aistudio.openSelectKey) {
-      await window.aistudio.openSelectKey();
-      setError(null);
-      setShowKeyPicker(false);
-      connect(); // Retry after selection
-    }
-  };
-
-  const handleSaveCustomKey = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    const trimmed = apiKeyInput.trim();
-    if (!trimmed) {
-      setError("Please enter a valid Gemini API key.");
-      return;
-    }
-    localStorage.setItem('zara_gemini_api_key', trimmed);
-    setHasSavedKey(true);
-    setShowKeyPicker(false);
-    setError(null);
-    setTimeout(() => {
-      connect();
-    }, 50);
-  };
-
-  const handleClearKey = () => {
-    localStorage.removeItem('zara_gemini_api_key');
-    setApiKeyInput('');
-    setHasSavedKey(false);
-    cleanup();
-  };
-
   const reportError = (err: any) => {
-    const { message, needsKey } = friendlyLiveError(err);
+    const { message } = friendlyLiveError(err);
     console.error("Live session error:", err);
-    if (isMountedRef.current) {
-      setError(message);
-      if (needsKey) setShowKeyPicker(true);
-    }
+    if (isMountedRef.current) setError(message);
   };
 
   const appendTranscript = (role: 'user' | 'model', text: string) => {
@@ -290,20 +271,11 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
       return;
     }
 
-    const apiKey = localStorage.getItem('zara_gemini_api_key') || (window as any).__ZARA_RUNTIME_KEY__ || '';
-    if (!apiKey) {
-      setShowKeyPicker(true);
-      setStatus('Ready');
-      setIsActive(false);
-      return;
-    }
-
     // Cleanup previous session if any
     cleanup();
     userEndedRef.current = false;
 
     setError(null);
-    setShowKeyPicker(false);
     setIsActive(true);
     setStatus('Initializing...');
 
@@ -348,9 +320,13 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
 3. **ACCURACY**: If the user asks for the date, day, or time, use the above information exactly.
 4. **MEDIA**: When the user asks to play a song or video, use the play_media tool.${nickname}`;
 
+      // Short-lived token from our backend — no API key in the browser, no key prompt
+      const live = await fetchLiveToken();
+      if (!isMountedRef.current || inputCtx.state === 'closed') return;
+
       const sessionManager = new LiveSessionManager(
-        apiKey,
-        'models/gemini-2.5-flash-native-audio-preview-12-2025',
+        live.token,
+        live.model,
         {
           responseModalities: [Modality.AUDIO],
           tools: [{ functionDeclarations: [MEDIA_PLAYER_TOOL] }],
@@ -433,7 +409,8 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
             }
             cleanup(userEndedRef.current ? 'Ready' : 'Disconnected');
           }
-        }
+        },
+        'v1alpha'   // ephemeral tokens require the v1alpha API
       );
 
       liveSessionRef.current = sessionManager;
@@ -547,88 +524,6 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
         </div>
       </div>
 
-      {/* Key Selection Prompt */}
-      {showKeyPicker && (
-        <div className="absolute inset-0 z-[60] bg-black/80 backdrop-blur-md flex items-center justify-center p-6 animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="live-key-title">
-          <div className="bg-surface border border-white/10 rounded-[2rem] p-8 max-w-md w-full text-center shadow-2xl relative">
-            <button
-              onClick={() => {
-                setShowKeyPicker(false);
-                if (isActive) cleanup();
-              }}
-              className="absolute top-4 right-4 p-2 text-text-sub hover:text-text rounded-full hover:bg-white/5 transition-colors"
-              aria-label="Close"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mx-auto mb-6 text-primary">
-              <Key className="w-8 h-8" />
-            </div>
-            <h3 id="live-key-title" className="text-xl font-bold mb-2">Gemini API Key Required</h3>
-            <p className="text-text-sub text-sm mb-6 leading-relaxed">
-              Live Voice Mode streams real-time audio through Gemini Multimodal Live API. Paste your Gemini API key below to connect. It is stored only in your browser.
-            </p>
-
-            <form onSubmit={handleSaveCustomKey} className="space-y-4 text-left">
-              <div>
-                <label htmlFor="live-api-key" className="block text-xs font-mono text-text-sub uppercase tracking-wider mb-2">
-                  Gemini API Key
-                </label>
-                <input
-                  id="live-api-key"
-                  type="password"
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="AIzaSy..."
-                  className="w-full px-4 py-3 bg-surfaceHighlight/50 border border-white/15 rounded-xl text-text placeholder-text-sub/40 focus:outline-none focus:border-primary font-mono text-sm"
-                  autoFocus
-                />
-              </div>
-
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="submit"
-                  className="flex-1 bg-primary hover:bg-primary-dark text-white py-3.5 rounded-xl font-bold transition-all shadow-lg shadow-primary/20 active:scale-95 text-sm"
-                >
-                  Save & Connect
-                </button>
-                {hasSavedKey && (
-                  <button
-                    type="button"
-                    onClick={handleClearKey}
-                    className="px-4 py-3.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-xl font-medium transition-all text-xs"
-                  >
-                    Clear Key
-                  </button>
-                )}
-              </div>
-
-              {window.aistudio && window.aistudio.openSelectKey && (
-                <button
-                  type="button"
-                  onClick={handleKeySelection}
-                  className="w-full bg-white/5 hover:bg-white/10 text-text py-2.5 rounded-xl text-xs font-medium transition-colors border border-white/10"
-                >
-                  Select via Google AI Studio
-                </button>
-              )}
-
-              <div className="pt-2 text-center">
-                <a
-                  href="https://aistudio.google.com/app/apikey"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-primary hover:underline text-xs inline-flex items-center gap-1"
-                >
-                  Get a free Gemini API key <ExternalLink className="w-3 h-3" />
-                </a>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* Media Card Overlay */}
       {mediaCard && isActive && (
         <div className="absolute top-4 left-4 right-4 z-50 flex justify-center animate-fade-in pointer-events-none">
@@ -690,7 +585,7 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
 
       {/* Footer Controls */}
       <div className="flex-shrink-0 p-6 bg-surface/30 backdrop-blur border-t border-border flex flex-col items-center gap-3">
-        {error && !showKeyPicker && !isActive && (
+        {error && !isActive && (
           <button onClick={() => { setError(null); connect(); }} className="flex items-center gap-2 text-xs bg-surfaceHighlight hover:bg-surface px-4 py-2 rounded-lg border border-white/10 mb-2">
             <RefreshCw className="w-3 h-3" /> Reconnect
           </button>
