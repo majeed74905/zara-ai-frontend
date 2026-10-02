@@ -95,6 +95,21 @@ export class LiveSessionManager {
         }
     }
 
+    /**
+     * Append context to the session WITHOUT asking for a reply (turnComplete: false).
+     * Used for internal "[note] …" cues that shape the next answer but are never spoken.
+     */
+    public sendClientContent(content: any) {
+        if (!this.isActive || !this.session) return;
+        try {
+            this.session.sendClientContent(content);
+        } catch (e: any) {
+            if (!e.message?.includes("CLOSING or CLOSED")) {
+                console.error("LiveSession sendClientContent Error:", e);
+            }
+        }
+    }
+
     public sendToolResponse(response: any) {
         if (!this.isActive || !this.session) return;
         try {

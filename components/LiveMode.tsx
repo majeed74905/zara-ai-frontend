@@ -114,6 +114,55 @@ const fetchLiveToken = async (): Promise<{ token: string; model: string }> => {
   }
 };
 
+interface ProsodySample {
+  energy: number | null;
+  speech_rate: number | null;
+  avg_pause_ms: number | null;
+  long_pauses: number;
+  duration_ms: number;
+  interrupted: boolean;
+  laughter: boolean;
+}
+
+/**
+ * Ask the backend how to handle the next turn, given what was said and how it sounded.
+ * Returns a short internal note (never spoken) or null if unavailable.
+ */
+const fetchTurnNote = async (
+  transcript: string,
+  prosody: ProsodySample,
+  model: string,
+  careMode: boolean,
+  recent: LiveMessage[]
+): Promise<string | null> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const res = await fetch(`${API_URL}/ai/live-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        transcript,
+        model,
+        interaction_mode: careMode ? 'care' : 'chat',
+        prosody,
+        recent_context: recent.slice(-6).map(m => ({
+          role: m.role === 'user' ? 'user' : 'assistant',
+          content: m.text.slice(0, 800),
+        })),
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data?.note === 'string' ? data.note : null;
+  } catch {
+    return null;   // voice keeps working without the hint
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel = 'zara-fast', recentContext, careMode = false }) => {
   const [isActive, setIsActive] = useState(false);
   const [status, setStatus] = useState('Ready');
@@ -138,6 +187,20 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
   const processingQueueRef = useRef<Promise<void>>(Promise.resolve());
   // When true, the next transcription chunk starts a new bubble (turn finished or interrupted)
   const turnBoundaryRef = useRef(true);
+
+  // Prosody for the turn in progress: HOW they're speaking, measured from the mic stream.
+  // Audio itself is never stored or sent anywhere — only these aggregate numbers.
+  const VOICE_THRESHOLD = 0.02;          // RMS above this counts as speech
+  const FRAME_MS = (2048 / 16000) * 1000; // one ScriptProcessor block ≈ 128ms
+  const turnAudioRef = useRef({ energySum: 0, voicedFrames: 0, silentRun: 0, pauses: [] as number[] });
+  const userTurnTextRef = useRef('');
+  const interruptedRef = useRef(false);
+
+  const resetTurnAudio = () => {
+    turnAudioRef.current = { energySum: 0, voicedFrames: 0, silentRun: 0, pauses: [] };
+    userTurnTextRef.current = '';
+    interruptedRef.current = false;
+  };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -265,6 +328,43 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
     });
   };
 
+  // Latest transcript list, readable from inside audio/session callbacks
+  const messagesRef = useRef<LiveMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  /**
+   * Zara finished a turn: summarise how the user spoke, ask the backend how to handle
+   * the next turn, and push that back as a silent note. Failures are ignored —
+   * the voice session keeps working without the hint.
+   */
+  const finalizeUserTurn = async () => {
+    const transcript = userTurnTextRef.current.trim();
+    const a = turnAudioRef.current;
+    const interrupted = interruptedRef.current;
+    resetTurnAudio();
+    if (!transcript || a.voicedFrames < 3) return;
+
+    const voicedMs = a.voicedFrames * FRAME_MS;
+    const words = transcript.split(/\s+/).filter(Boolean).length;
+    const prosody: ProsodySample = {
+      energy: a.voicedFrames ? Math.min(1, a.energySum / a.voicedFrames / 0.15) : null,
+      speech_rate: voicedMs > 0 ? words / (voicedMs / 1000) : null,
+      avg_pause_ms: a.pauses.length ? a.pauses.reduce((s, p) => s + p, 0) / a.pauses.length : null,
+      long_pauses: a.pauses.filter(p => p >= 900).length,
+      duration_ms: voicedMs,
+      interrupted,
+      laughter: /😂|🤣|\b(?:haha+|hehe+|lol)\b/i.test(transcript),
+    };
+
+    const note = await fetchTurnNote(transcript, prosody, chatModel, careMode, messagesRef.current);
+    if (note && liveSessionRef.current?.isConnected) {
+      liveSessionRef.current.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text: `[note] ${note}` }] }],
+        turnComplete: false,   // context only — does not trigger a reply
+      });
+    }
+  };
+
   const connect = async () => {
     if (!navigator.onLine) {
       setError("You're offline. Check your internet connection and try again.");
@@ -376,16 +476,21 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
             if (isMountedRef.current) {
               const inputText = message.serverContent?.inputTranscription?.text;
               const outputText = message.serverContent?.outputTranscription?.text;
-              if (inputText) appendTranscript('user', inputText);
+              if (inputText) {
+                appendTranscript('user', inputText);
+                userTurnTextRef.current += inputText;
+              }
               if (outputText) appendTranscript('model', outputText);
             }
 
             if (message.serverContent?.turnComplete) {
               turnBoundaryRef.current = true;
+              void finalizeUserTurn();   // queue a silent hint for the next turn
             }
 
             if (message.serverContent?.interrupted) {
               // User started talking: stop Zara immediately so she never talks over them
+              interruptedRef.current = true;
               processingQueueRef.current = Promise.resolve();
               audioQueueRef.current.forEach(s => { try { s.stop(); } catch (e) { } });
               audioQueueRef.current = [];
@@ -434,7 +539,22 @@ export const LiveMode: React.FC<LiveModeProps> = ({ personalization, chatModel =
 
           let sum = 0;
           for (let i = 0; i < inputData.length; i += 16) sum += inputData[i] * inputData[i];
-          setVolume(Math.sqrt(sum / (inputData.length / 16)) * 5);
+          const rms = Math.sqrt(sum / (inputData.length / 16));
+          setVolume(rms * 5);
+
+          // How they're speaking: loudness, pauses, speaking time. Aggregates only — no audio kept.
+          const ta = turnAudioRef.current;
+          if (rms > VOICE_THRESHOLD) {
+            if (ta.silentRun > 0) {
+              const pauseMs = ta.silentRun * FRAME_MS;
+              if (ta.voicedFrames > 0 && pauseMs >= 250) ta.pauses.push(pauseMs);
+              ta.silentRun = 0;
+            }
+            ta.voicedFrames += 1;
+            ta.energySum += rms;
+          } else if (ta.voicedFrames > 0) {
+            ta.silentRun += 1;
+          }
 
           if (inputCtx.sampleRate !== 16000) {
             inputData = downsampleBuffer(inputData, inputCtx.sampleRate, 16000);
